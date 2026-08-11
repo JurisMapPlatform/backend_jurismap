@@ -12,7 +12,7 @@ from app.services.ws import ws_manager
 limiter = Limiter(key_func=get_remote_address)
 
 app = FastAPI(
-    title="JurisMind API",
+    title="JurisMap API",
     description="Plataforma que combina **Deep Learning (BETO)** e **IA Generativa (Gemini 2.5 Flash)** "
                 "para analizar sentencias del Tribunal Constitucional del Perú y generar "
                 "**mapas mentales interactivos** orientados a estudiantes de derecho.",
@@ -53,7 +53,8 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
@@ -83,4 +84,4 @@ async def websocket_endpoint(websocket: WebSocket):
          summary="Service health check",
          description="Returns the current status of the API. Used by Cloud Run for liveness probes.")
 async def health():
-    return {"status": "ok", "service": "JurisMind API", "version": "1.0.0"}
+    return {"status": "ok", "service": "JurisMap API", "version": "1.0.0"}

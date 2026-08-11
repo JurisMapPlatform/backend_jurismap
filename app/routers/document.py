@@ -1,3 +1,4 @@
+import asyncio
 import re
 import uuid
 
@@ -52,7 +53,7 @@ async def upload_document(
     safe_filename = _sanitize_filename(file.filename)
 
     extractor = _get_extractor()
-    is_valid, page_count = extractor.is_readable(content)
+    is_valid, page_count = await asyncio.to_thread(extractor.is_readable, content)
     validation = DocumentValidation(is_valid=is_valid, page_count=page_count)
     if not is_valid:
         validation.error = "El PDF no contiene texto extraíble (posiblemente escaneado sin OCR)"
@@ -84,7 +85,7 @@ async def validate_document(
 ):
     content = await file.read()
     ext = _get_extractor()
-    is_valid, page_count = ext.is_readable(content)
+    is_valid, page_count = await asyncio.to_thread(ext.is_readable, content)
     validation = DocumentValidation(is_valid=is_valid, page_count=page_count)
     if not is_valid:
         validation.error = "El PDF no contiene texto extraíble"

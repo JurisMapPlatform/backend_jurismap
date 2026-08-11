@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 
 from fastapi import HTTPException, status
@@ -33,7 +34,7 @@ class MindMapService:
             parent_id = root["id"] if root else (nodes[0]["id"] if nodes else "root")
 
         try:
-            gen = GeminiClient().generate_node({"nodes": nodes}, request.prompt)
+            gen = await asyncio.to_thread(GeminiClient().generate_node, {"nodes": nodes}, request.prompt)
             label = (gen.get("label") or request.prompt)[:60]
             metadata = gen.get("metadata") or {}
         except Exception:
@@ -101,7 +102,7 @@ class MindMapService:
         from app.repositories.document import DocumentRepository
         from app.repositories.storage import StorageRepository
         from app.ai.extractor import PDFExtractor
-        from app.ai.classifier import BETOClassifier
+        from app.ai.classifier import get_classifier
         from app.ai.gemini import GeminiClient
 
         analysis = await self._get_analysis(analysis_id, user_id)
@@ -118,9 +119,9 @@ class MindMapService:
             if not doc:
                 continue
             pdf_bytes = await storage.download(doc.storage_path)
-            text = extractor.extract_text(pdf_bytes)
+            text = await asyncio.to_thread(extractor.extract_text, pdf_bytes)
             full_text += text + "\n"
-            fundamentos = extractor.extract_fundamentos(pdf_bytes)
+            fundamentos = await asyncio.to_thread(extractor.extract_fundamentos, pdf_bytes)
             for f in fundamentos:
                 f["document_id"] = str(doc.id)
             all_fundamentos.extend(fundamentos)
@@ -128,18 +129,18 @@ class MindMapService:
         if not all_fundamentos:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No se encontraron fundamentos")
 
+        def _classify():
+            return get_classifier().classify_fundamentos(all_fundamentos)
         try:
-            classifier = BETOClassifier()
-            classifier.load_model()
-            all_fundamentos = classifier.classify_fundamentos(all_fundamentos)
+            all_fundamentos = await asyncio.to_thread(_classify)
         except FileNotFoundError:
             for f in all_fundamentos:
                 f["beto_label"] = "RELEVANTE"
                 f["beto_confidence"] = 0.5
 
         gemini = GeminiClient()
-        selected = gemini.analyze_fundamentos(all_fundamentos)
-        parties = gemini.extract_parties(full_text[:3000])
+        selected = await asyncio.to_thread(gemini.analyze_fundamentos, all_fundamentos)
+        parties = await asyncio.to_thread(gemini.extract_parties, full_text[:3000])
 
         selected_nums = {s["n"] for s in selected}
         fundamentos_for_map = [f for f in all_fundamentos if f["fundamento_num"] in selected_nums]
@@ -159,11 +160,10 @@ class MindMapService:
                 for f in fundamentos_for_map
             ],
         }
-        mind_map = gemini.build_mindmap(analysis_data, analysis.custom_prompt)
+        mind_map = await asyncio.to_thread(gemini.build_mindmap, analysis_data, analysis.custom_prompt)
 
-        for node in mind_map.get("nodes", []):
-            if node.get("type") == "fundamento" and node.get("metadata", {}).get("original"):
-                node["metadata"]["simplified"] = gemini.simplify(node["metadata"]["original"])
+        # Las explicaciones simplificadas ya vienen en metadata.summary desde build_mindmap;
+        # se eliminó la llamada por-nodo a gemini.simplify() para no agotar la cuota de Gemini.
 
         await self.repo.update_analysis_results(analysis_id, mind_map_data=mind_map, parties=parties, background=full_text[:2000])
         return mind_map

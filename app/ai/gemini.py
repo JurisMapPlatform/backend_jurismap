@@ -1,18 +1,34 @@
 import json
+import logging
 import re
+import time
 
 import vertexai
 from vertexai.generative_models import GenerativeModel
 
 from app.config import settings
 
-GEMINI_MODEL = "gemini-2.5-flash"
+logger = logging.getLogger(__name__)
 
 
 class GeminiClient:
     def __init__(self):
-        vertexai.init(project=settings.gcp_project_id, location=settings.gcp_location)
-        self.model = GenerativeModel(GEMINI_MODEL)
+        vertexai.init(project=settings.gcp_project_id, location=settings.gemini_location)
+        self.model = GenerativeModel(settings.gemini_model)
+
+    def _generate(self, prompt: str, max_retries: int = 4) -> str:
+        for attempt in range(max_retries):
+            try:
+                response = self.model.generate_content(prompt)
+                return response.text
+            except Exception as e:
+                if "429" in str(e) and attempt < max_retries - 1:
+                    wait = 15 * (2 ** attempt)
+                    logger.warning(f"Gemini 429, reintentando en {wait}s (intento {attempt + 1}/{max_retries})")
+                    time.sleep(wait)
+                else:
+                    raise
+        raise RuntimeError("Max retries exceeded")
 
     def _parse_json(self, text: str) -> dict | list:
         cleaned = re.sub(r"^```(?:json)?\s*", "", text.strip())
@@ -57,8 +73,8 @@ Responde SOLO con JSON:
 
 Donde "beto_agreed" indica si coincides con la clasificación de BETO para ese fundamento."""
 
-        response = self.model.generate_content(prompt)
-        return self._parse_json(response.text)
+        text = self._generate(prompt)
+        return self._parse_json(text)
 
     def simplify(self, texto: str) -> str:
         prompt = f"""Simplifica el siguiente fundamento jurídico para que un estudiante de derecho
@@ -69,8 +85,7 @@ Fundamento: {texto[:1500]}
 
 Responde SOLO con el texto simplificado."""
 
-        response = self.model.generate_content(prompt)
-        return response.text.strip()
+        return self._generate(prompt).strip()
 
     def build_mindmap(self, analysis_data: dict, custom_prompt: str | None = None) -> dict:
         context = json.dumps(analysis_data, ensure_ascii=False)[:8000]
@@ -165,8 +180,8 @@ JSON (responde SOLO esto, nada más):
 
 RECUERDA: label = MÁXIMO 3 PALABRAS. metadata.original = texto COMPLETO del fundamento. Las 6 categorías son OBLIGATORIAS."""
 
-        response = self.model.generate_content(prompt)
-        return self._parse_json(response.text)
+        text = self._generate(prompt)
+        return self._parse_json(text)
 
     def compare_sentences(self, analyses_data: list[dict]) -> dict:
         context = json.dumps(analyses_data, ensure_ascii=False)[:8000]
@@ -178,8 +193,8 @@ Datos:
 
 Responde SOLO con JSON en formato React Flow (nodes + edges)."""
 
-        response = self.model.generate_content(prompt)
-        return self._parse_json(response.text)
+        text = self._generate(prompt)
+        return self._parse_json(text)
 
     def generate_node(self, context: dict, prompt: str) -> dict:
         context_str = json.dumps(context, ensure_ascii=False)[:3000]
@@ -196,8 +211,8 @@ REGLAS:
 Responde SOLO con JSON:
 {{"label": "título corto", "metadata": {{"summary": "explicación completa del nodo"}}}}"""
 
-        response = self.model.generate_content(gen_prompt)
-        return self._parse_json(response.text)
+        text = self._generate(gen_prompt)
+        return self._parse_json(text)
 
     def extract_parties(self, text: str) -> dict:
         prompt = f"""Extrae las partes procesales del siguiente texto de una sentencia del TC peruano.
@@ -206,5 +221,5 @@ Responde SOLO con JSON:
 
 Responde SOLO con JSON: {{"demandante": "nombre", "demandado": "nombre", "materia": "tipo de proceso"}}"""
 
-        response = self.model.generate_content(prompt)
-        return self._parse_json(response.text)
+        text = self._generate(prompt)
+        return self._parse_json(text)

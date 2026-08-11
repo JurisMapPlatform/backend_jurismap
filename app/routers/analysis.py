@@ -8,7 +8,7 @@ from app.routers.deps import get_current_user
 from app.models.user import User
 from app.services.analysis import AnalysisService
 from app.schemas.analysis import (
-    AnalysisCreate, AnalysisResponse, AnalysisDetail,
+    AnalysisCreate, AnalysisUpdate, AnalysisResponse, AnalysisDetail,
     AnalysisListResponse, AnalysisStats,
 )
 
@@ -102,6 +102,24 @@ async def get_analysis(
         created_at=analysis.created_at, updated_at=analysis.updated_at,
         document_count=len(documents), node_count=node_count,
         documents=documents, findings=analysis.findings,
+    )
+
+
+@router.patch("/{analysis_id}", response_model=AnalysisResponse,
+              summary="Rename an analysis",
+              description="Updates the title of an existing analysis. Only the owner can rename it.")
+async def rename_analysis(
+    analysis_id: uuid.UUID,
+    data: AnalysisUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = AnalysisService(db)
+    analysis = await service.rename(analysis_id, current_user.id, data.title)
+    return AnalysisResponse(
+        id=analysis.id, title=analysis.title, status=analysis.status,
+        processing_step=analysis.processing_step, created_at=analysis.created_at,
+        updated_at=analysis.updated_at,
     )
 
 

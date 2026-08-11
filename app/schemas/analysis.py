@@ -13,6 +13,10 @@ class AnalysisCreate(BaseModel):
     custom_prompt: str | None = None
 
 
+class AnalysisUpdate(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+
+
 class AnalysisResponse(BaseModel):
     id: uuid.UUID
     title: str

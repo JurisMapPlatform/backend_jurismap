@@ -31,15 +31,18 @@ class AuthService:
             full_name=data.full_name,
             verification_token=str(uuid.uuid4()),
         )
-        return await self.repo.create(user)
+        user = await self.repo.create(user)
+
+        from app.services.email import send_verification_email
+        await send_verification_email(user.email, user.full_name, user.verification_token)
+        return user
 
     async def login(self, email: str, password: str) -> TokenResponse:
         user = await self.repo.get_by_email(email)
         if not user or not user.hashed_password or not pwd_context.verify(password, user.hashed_password):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales incorrectas")
-        # TODO: reactivar cuando se implemente el servicio de email
-        # if not user.is_verified:
-        #     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Correo no verificado")
+        if settings.require_email_verification and not user.is_verified:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Debes verificar tu correo antes de iniciar sesión")
         return self._create_token(user)
 
     async def google_auth(self, credential: str) -> TokenResponse:
@@ -81,6 +84,9 @@ class AuthService:
         user.reset_token = str(uuid.uuid4())
         user.reset_token_expires = datetime.now(timezone.utc) + timedelta(hours=1)
         await self.repo.update(user)
+
+        from app.services.email import send_password_reset_email
+        await send_password_reset_email(user.email, user.full_name, user.reset_token)
 
     async def reset_password(self, token: str, new_password: str) -> None:
         user = await self.repo.get_by_reset_token(token)

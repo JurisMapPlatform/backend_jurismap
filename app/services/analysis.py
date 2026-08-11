@@ -6,6 +6,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.analysis import Analysis, AnalysisDocument
+from app.models.fundamento import AnalysisFundamento
 from app.repositories.analysis import AnalysisRepository
 from app.repositories.document import DocumentRepository
 from app.services.ws import ws_manager
@@ -59,7 +60,7 @@ class AnalysisService:
     async def _process(self, analysis_id: uuid.UUID, user_id: str):
         from app.database import async_session
         from app.ai.extractor import PDFExtractor
-        from app.ai.classifier import BETOClassifier
+        from app.ai.classifier import get_classifier
         from app.ai.gemini import GeminiClient
         from app.repositories.storage import StorageRepository
 
@@ -86,9 +87,9 @@ class AnalysisService:
                     if not doc:
                         continue
                     pdf_bytes = await storage.download(doc.storage_path)
-                    text = extractor.extract_text(pdf_bytes)
+                    text = await asyncio.to_thread(extractor.extract_text, pdf_bytes)
                     full_text += text + "\n"
-                    fundamentos = extractor.extract_fundamentos(pdf_bytes)
+                    fundamentos = await asyncio.to_thread(extractor.extract_fundamentos, pdf_bytes)
                     for f in fundamentos:
                         f["document_id"] = str(doc_id)
                     all_fundamentos.extend(fundamentos)
@@ -100,10 +101,10 @@ class AnalysisService:
                 await self._notify(user_id, analysis_id, 2)
                 await repo.update_status(analysis_id, "processing", step=2)
 
+                def _classify():
+                    return get_classifier().classify_fundamentos(all_fundamentos)
                 try:
-                    classifier = BETOClassifier()
-                    classifier.load_model()
-                    all_fundamentos = classifier.classify_fundamentos(all_fundamentos)
+                    all_fundamentos = await asyncio.to_thread(_classify)
                 except FileNotFoundError:
                     for f in all_fundamentos:
                         f["beto_label"] = "RELEVANTE"
@@ -114,9 +115,9 @@ class AnalysisService:
                 await repo.update_status(analysis_id, "processing", step=3)
 
                 gemini = GeminiClient()
-                selected = gemini.analyze_fundamentos(all_fundamentos)
+                selected = await asyncio.to_thread(gemini.analyze_fundamentos, all_fundamentos)
 
-                parties = gemini.extract_parties(full_text[:3000])
+                parties = await asyncio.to_thread(gemini.extract_parties, full_text[:3000])
 
                 # --- Paso 4: Construcción del mapa mental ---
                 await self._notify(user_id, analysis_id, 4)
@@ -140,15 +141,31 @@ class AnalysisService:
                         for f in fundamentos_for_map
                     ],
                 }
-                mind_map = gemini.build_mindmap(analysis_data, analysis.custom_prompt)
+                mind_map = await asyncio.to_thread(gemini.build_mindmap, analysis_data, analysis.custom_prompt)
 
                 # --- Paso 5: Generación de explicaciones ---
+                # Las explicaciones simplificadas ya vienen en metadata.summary desde build_mindmap
+                # (paso 4). Se eliminó la llamada por-nodo a gemini.simplify() porque disparaba una
+                # petición extra a Gemini por cada fundamento, agotando la cuota tras pocos análisis.
                 await self._notify(user_id, analysis_id, 5)
                 await repo.update_status(analysis_id, "processing", step=5)
 
-                for node in mind_map.get("nodes", []):
-                    if node.get("type") == "fundamento" and node.get("metadata", {}).get("original"):
-                        node["metadata"]["simplified"] = gemini.simplify(node["metadata"]["original"])
+                # Persistir la clasificación de cada fundamento (label/confianza de RoBERTalex,
+                # si fue seleccionado, y su explicación). Alimenta el detalle del análisis y el PDF.
+                findings = [
+                    AnalysisFundamento(
+                        analysis_id=analysis_id,
+                        document_id=uuid.UUID(f["document_id"]),
+                        fundamento_num=f["fundamento_num"],
+                        texto=f["texto"],
+                        label=f.get("beto_label", "RELEVANTE"),
+                        confidence=float(f.get("beto_confidence", 0.5)),
+                        is_selected=f["fundamento_num"] in selected_nums,
+                        simplified_text=summaries.get(f["fundamento_num"]) if f["fundamento_num"] in selected_nums else None,
+                    )
+                    for f in all_fundamentos
+                ]
+                await repo.save_fundamentos(findings)
 
                 # --- Guardar resultados ---
                 await repo.update_analysis_results(
@@ -175,6 +192,14 @@ class AnalysisService:
         analysis = await self.analysis_repo.get_detail(analysis_id)
         if not analysis or analysis.user_id != user_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Análisis no encontrado")
+        return analysis
+
+    async def rename(self, analysis_id: uuid.UUID, user_id: uuid.UUID, title: str) -> Analysis:
+        analysis = await self.analysis_repo.get_by_id(analysis_id)
+        if not analysis or analysis.user_id != user_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Análisis no encontrado")
+        analysis.title = title
+        await self.analysis_repo.update(analysis)
         return analysis
 
     async def delete(self, analysis_id: uuid.UUID, user_id: uuid.UUID) -> None:
