@@ -146,9 +146,12 @@ class MindMapService:
         fundamentos_for_map = [f for f in all_fundamentos if f["fundamento_num"] in selected_nums]
         summaries = {s["n"]: s["summary"] for s in selected}
 
+        fallo_text = extractor.extract_fallo(full_text)
+
         analysis_data = {
             "expediente": analysis.title,
             "parties": parties,
+            "fallo_text": fallo_text,
             "full_text_preview": full_text[:2000],
             "fundamentos": [
                 {

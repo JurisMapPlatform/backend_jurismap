@@ -88,7 +88,7 @@ Responde SOLO con el texto simplificado."""
         return self._generate(prompt).strip()
 
     def build_mindmap(self, analysis_data: dict, custom_prompt: str | None = None) -> dict:
-        context = json.dumps(analysis_data, ensure_ascii=False)[:8000]
+        context = json.dumps(analysis_data, ensure_ascii=False)[:16000]
         expediente = analysis_data.get("expediente", "Sentencia TC")
 
         reglas_comunes = """REGLAS DE FORMATO (siempre aplican):
@@ -142,6 +142,7 @@ Datos:
    - materia, partes, pretension, antecedentes, fundamentos, fallo
 6. Cada categoría DEBE tener al menos 1 sub-nodo.
 7. PROHIBIDO incluir un nodo de "Votos singulares" o similar. NUNCA lo agregues en este modo predeterminado.
+8. Para la categoría "fallo" USA el campo "fallo_text" de los datos (es la parte resolutiva real al final de la sentencia, p. ej. "HA RESUELTO ..."). Coloca el sentido de la decisión en el "label" (MÁX 3 palabras, p. ej. "Fundada en parte", "Improcedente") y copia el texto resolutivo EXACTO en metadata.original, con una explicación en metadata.summary. Si "fallo_text" tiene varios puntos resolutivos, crea un sub-nodo por punto. NUNCA inventes el fallo: si "fallo_text" viene vacío o sin resolución clara, dilo en el summary.
 
 JSON (responde SOLO esto, nada más):
 {{
