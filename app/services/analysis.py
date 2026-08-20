@@ -124,7 +124,13 @@ class AnalysisService:
                 await repo.update_status(analysis_id, "processing", step=4)
 
                 selected_nums = {s["n"] for s in selected}
-                fundamentos_for_map = [f for f in all_fundamentos if f["fundamento_num"] in selected_nums]
+                _seen_nums = set()
+                fundamentos_for_map = []
+                for f in all_fundamentos:
+                    n = f["fundamento_num"]
+                    if n in selected_nums and n not in _seen_nums:
+                        _seen_nums.add(n)
+                        fundamentos_for_map.append(f)
                 summaries = {s["n"]: s["summary"] for s in selected}
 
                 # El fallo (parte resolutiva) va al final de la sentencia y no es un fundamento

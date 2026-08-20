@@ -143,7 +143,13 @@ class MindMapService:
         parties = await asyncio.to_thread(gemini.extract_parties, full_text[:3000])
 
         selected_nums = {s["n"] for s in selected}
-        fundamentos_for_map = [f for f in all_fundamentos if f["fundamento_num"] in selected_nums]
+        _seen_nums = set()
+        fundamentos_for_map = []
+        for f in all_fundamentos:
+            n = f["fundamento_num"]
+            if n in selected_nums and n not in _seen_nums:
+                _seen_nums.add(n)
+                fundamentos_for_map.append(f)
         summaries = {s["n"]: s["summary"] for s in selected}
 
         fallo_text = extractor.extract_fallo(full_text)

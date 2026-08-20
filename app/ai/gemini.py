@@ -10,6 +10,12 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Arquitectura de dos etapas para elegir los fundamentos del mapa:
+#   Etapa 1 (RoBERTalex): filtra los RELEVANTE por confianza -> hasta N candidatos.
+#   Etapa 2 (Gemini): de esos candidatos, elige/ordena los más importantes.
+MAX_FUNDAMENTO_CANDIDATOS = 20   # cuántos candidatos relevantes pasa RoBERTalex a Gemini
+MAX_FUNDAMENTOS_MAPA = 15        # tope duro de fundamentos en el mapa
+
 
 class GeminiClient:
     def __init__(self):
@@ -42,39 +48,50 @@ class GeminiClient:
             raise
 
     def analyze_fundamentos(self, fundamentos: list[dict]) -> list[dict]:
-        relevantes = [f for f in fundamentos if f.get("beto_label") == "RELEVANTE"]
-        no_relevantes = [f for f in fundamentos if f.get("beto_label") == "NO_RELEVANTE"]
-
-        rel_text = "\n".join(
-            f"[Fund. {f['fundamento_num']}] (BETO: RELEVANTE, confianza: {f.get('beto_confidence', 0):.2f}) {f['texto'][:500]}"
-            for f in relevantes
+        # --- Etapa 1: RoBERTalex define el universo de candidatos (filtro de relevancia) ---
+        # Un fundamento puede aparecer varias veces en el PDF; se de-duplica por número
+        # quedándose con la instancia de MAYOR confianza. Luego se toman los RELEVANTE
+        # ordenados por confianza (top N). Gemini SOLO verá estos candidatos.
+        by_num: dict[int, dict] = {}
+        for f in fundamentos:
+            n = f["fundamento_num"]
+            if n not in by_num or f.get("beto_confidence", 0) > by_num[n].get("beto_confidence", 0):
+                by_num[n] = f
+        unicos = list(by_num.values())
+        relevantes = sorted(
+            [f for f in unicos if f.get("beto_label") == "RELEVANTE"],
+            key=lambda f: f.get("beto_confidence", 0.0), reverse=True,
         )
-        nrel_summary = "\n".join(
-            f"[Fund. {f['fundamento_num']}] (BETO: NO_RELEVANTE, confianza: {f.get('beto_confidence', 0):.2f}) {f['texto'][:200]}"
-            for f in no_relevantes
+        # Si el clasificador no marcó ninguno como RELEVANTE, se usan los de mayor confianza.
+        candidatos = (relevantes or sorted(unicos, key=lambda f: f.get("beto_confidence", 0.0), reverse=True))
+        candidatos = candidatos[:MAX_FUNDAMENTO_CANDIDATOS]
+
+        cand_text = "\n".join(
+            f"[Fund. {f['fundamento_num']}] (confianza RoBERTalex: {f.get('beto_confidence', 0):.2f}) {f['texto'][:500]}"
+            for f in candidatos
         )
 
-        prompt = f"""Eres un experto en derecho constitucional peruano. Analiza los fundamentos de esta sentencia del Tribunal Constitucional.
+        # --- Etapa 2: Gemini elige y ordena los MÁS IMPORTANTES entre los candidatos ---
+        prompt = f"""Eres un experto en derecho constitucional peruano. Un clasificador especializado (RoBERTalex) ya filtró los fundamentos jurídicamente RELEVANTES de esta sentencia del Tribunal Constitucional. Estos son los candidatos (todos ya considerados relevantes):
 
-Un modelo de IA (BETO) ya clasificó cada fundamento como RELEVANTE o NO_RELEVANTE. Usa estas clasificaciones como referencia, pero toma tu propia decisión final.
+{cand_text}
 
-FUNDAMENTOS MARCADOS COMO RELEVANTES POR BETO (prioridad alta):
-{rel_text}
+De ESTOS candidatos, selecciona los MÁS IMPORTANTES para entender el razonamiento del caso y construir un mapa mental claro.
 
-FUNDAMENTOS MARCADOS COMO NO RELEVANTES POR BETO (revisa si alguno debería incluirse):
-{nrel_summary}
+REGLAS:
+- Elige entre 5 y 15 fundamentos; idealmente alrededor de 8. NUNCA más de 15.
+- Ordénalos de MÁS a MENOS importante.
+- Usa ÚNICAMENTE números que aparezcan en la lista de candidatos; no inventes números.
 
-Selecciona los fundamentos más importantes para construir un mapa mental del razonamiento jurídico.
-Puedes incluir fundamentos que BETO marcó como NO_RELEVANTE si consideras que son esenciales.
-Puedes excluir fundamentos que BETO marcó como RELEVANTE si son redundantes o poco informativos.
-
-Responde SOLO con JSON:
-[{{"n": 1, "summary": "resumen breve", "beto_agreed": true}}]
-
-Donde "beto_agreed" indica si coincides con la clasificación de BETO para ese fundamento."""
+Responde SOLO con JSON, en orden de importancia:
+[{{"n": 12, "summary": "resumen breve y claro del fundamento"}}]"""
 
         text = self._generate(prompt)
-        return self._parse_json(text)
+        result = self._parse_json(text)
+        if isinstance(result, list):
+            # Tope duro: nunca más de MAX_FUNDAMENTOS_MAPA, aunque Gemini se pase.
+            return result[:MAX_FUNDAMENTOS_MAPA]
+        return result
 
     def simplify(self, texto: str) -> str:
         prompt = f"""Simplifica el siguiente fundamento jurídico para que un estudiante de derecho
@@ -142,7 +159,7 @@ Datos:
    - materia, partes, pretension, antecedentes, fundamentos, fallo
 6. Cada categoría DEBE tener al menos 1 sub-nodo.
 7. PROHIBIDO incluir un nodo de "Votos singulares" o similar. NUNCA lo agregues en este modo predeterminado.
-8. Para la categoría "fallo" USA el campo "fallo_text" de los datos (es la parte resolutiva real al final de la sentencia, p. ej. "HA RESUELTO ..."). Coloca el sentido de la decisión en el "label" (MÁX 3 palabras, p. ej. "Fundada en parte", "Improcedente") y copia el texto resolutivo EXACTO en metadata.original, con una explicación en metadata.summary. Si "fallo_text" tiene varios puntos resolutivos, crea un sub-nodo por punto. NUNCA inventes el fallo: si "fallo_text" viene vacío o sin resolución clara, dilo en el summary.
+8. Para la categoría "fallo" USA el campo "fallo_text" de los datos (es la parte resolutiva real al final de la sentencia, p. ej. "HA RESUELTO ..."). Crea 1 SOLO nodo (MÁXIMO 2) para el fallo: pon el sentido general de la decisión en el "label" (MÁX 3 palabras, p. ej. "Fundada en parte", "Improcedente") y copia TODO el texto resolutivo EXACTO en metadata.original, con una explicación en metadata.summary. Usa 2 nodos SOLO si hay dos sentidos claramente distintos (p. ej. una parte fundada y otra infundada); NUNCA más de 2, aunque el fallo tenga varios puntos numerados (agrúpalos). NUNCA inventes el fallo: si "fallo_text" viene vacío o sin resolución clara, dilo en el summary.
 
 JSON (responde SOLO esto, nada más):
 {{
