@@ -1,0 +1,22 @@
+# Entorno virtual local (las dependencias se instalan desde requirements.txt)
+venv/
+.venv/
+
+# Almacenamiento local de archivos subidos (en producción se usa GCS)
+storage/
+
+# Configuración local (en producción se usan las variables de entorno de Cloud Run)
+.env
+.env.*
+!.env.example
+
+# Control de versiones
+.git/
+.gitignore
+
+# Cachés y temporales de Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
