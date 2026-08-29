@@ -10,7 +10,7 @@ from app.services.auth import AuthService
 from app.schemas.auth import (
     UserRegister, UserLogin, GoogleAuthRequest,
     TokenResponse, UserResponse, MessageResponse,
-    ForgotPasswordRequest, ResetPasswordRequest,
+    ForgotPasswordRequest, ResetPasswordRequest, ResendVerificationRequest,
 )
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -72,6 +72,18 @@ async def forgot_password(request: Request, data: ForgotPasswordRequest, db: Asy
     service = AuthService(db)
     await service.request_password_reset(data.email)
     return MessageResponse(message="Si el correo existe, se enviará un enlace de recuperación")
+
+
+@router.post("/resend-verification", response_model=MessageResponse,
+             summary="Resend email verification link",
+             description="Sends a new email verification link to the user's email (HU-02). "
+                         "For security, always returns success even if the email doesn't exist "
+                         "or is already verified. Rate limited to 3 requests per minute.")
+@limiter.limit("3/minute")
+async def resend_verification(request: Request, data: ResendVerificationRequest, db: AsyncSession = Depends(get_db)):
+    service = AuthService(db)
+    await service.resend_verification(data.email)
+    return MessageResponse(message="Si la cuenta existe y no está verificada, se ha enviado un nuevo enlace")
 
 
 @router.post("/reset-password", response_model=MessageResponse,

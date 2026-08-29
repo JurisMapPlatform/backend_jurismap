@@ -77,6 +77,18 @@ class AuthService:
         await self.repo.update(user)
         return True
 
+    async def resend_verification(self, email: str) -> None:
+        # HU-02: reenvía el correo de validación con un nuevo enlace. Por seguridad no revela
+        # si el correo existe; ignora cuentas ya verificadas o de Google (sin contraseña).
+        user = await self.repo.get_by_email(email)
+        if not user or user.is_verified or not user.hashed_password:
+            return
+        user.verification_token = str(uuid.uuid4())
+        await self.repo.update(user)
+
+        from app.services.email import send_verification_email
+        await send_verification_email(user.email, user.full_name, user.verification_token)
+
     async def request_password_reset(self, email: str) -> None:
         user = await self.repo.get_by_email(email)
         if not user:
