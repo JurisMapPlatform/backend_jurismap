@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -75,8 +77,16 @@ async def websocket_endpoint(websocket: WebSocket):
     await ws_manager.connect(user_id, websocket)
     try:
         while True:
-            await websocket.receive_text()
+            # Heartbeat: si el cliente no envía nada en 20s, mandamos un "ping" para mantener
+            # viva la conexión durante los pasos largos del análisis (Gemini). Sin esto, un
+            # idle timeout del proxy la cierra y se pierden los eventos finales (p. ej. completed).
+            try:
+                await asyncio.wait_for(websocket.receive_text(), timeout=20)
+            except asyncio.TimeoutError:
+                await websocket.send_json({"type": "ping"})
     except WebSocketDisconnect:
+        ws_manager.disconnect(user_id)
+    except Exception:
         ws_manager.disconnect(user_id)
 
 
