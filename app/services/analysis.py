@@ -48,6 +48,14 @@ class AnalysisService:
         asyncio.create_task(self._process(analysis.id, str(user_id)))
         return analysis
 
+    async def _is_cancelled(self, repo, user_id: str, analysis_id: uuid.UUID) -> bool:
+        """Cancelación cooperativa: si el usuario canceló el análisis, el pipeline se detiene
+        en el siguiente punto de control y NO vuelve a marcarlo como 'processing'/'completed'."""
+        if (await repo.get_status(analysis_id)) == "cancelled":
+            await ws_manager.send_progress(user_id, {"analysis_id": str(analysis_id), "status": "cancelled"})
+            return True
+        return False
+
     async def _notify(self, user_id: str, analysis_id: uuid.UUID, step: int, step_status: str = "processing"):
         await ws_manager.send_progress(user_id, {
             "analysis_id": str(analysis_id),
@@ -97,6 +105,9 @@ class AnalysisService:
                 if not all_fundamentos:
                     raise ValueError("No se encontraron fundamentos en los documentos")
 
+                if await self._is_cancelled(repo, user_id, analysis_id):
+                    return
+
                 # --- Paso 2: Clasificación con BETO ---
                 await self._notify(user_id, analysis_id, 2)
                 await repo.update_status(analysis_id, "processing", step=2)
@@ -110,6 +121,9 @@ class AnalysisService:
                         f["beto_label"] = "RELEVANTE"
                         f["beto_confidence"] = 0.5
 
+                if await self._is_cancelled(repo, user_id, analysis_id):
+                    return
+
                 # --- Paso 3: Análisis con Gemini ---
                 await self._notify(user_id, analysis_id, 3)
                 await repo.update_status(analysis_id, "processing", step=3)
@@ -118,6 +132,9 @@ class AnalysisService:
                 selected = await asyncio.to_thread(gemini.analyze_fundamentos, all_fundamentos)
 
                 parties = await asyncio.to_thread(gemini.extract_parties, full_text[:3000])
+
+                if await self._is_cancelled(repo, user_id, analysis_id):
+                    return
 
                 # --- Paso 4: Construcción del mapa mental ---
                 await self._notify(user_id, analysis_id, 4)
@@ -155,6 +172,9 @@ class AnalysisService:
                 }
                 mind_map = await asyncio.to_thread(gemini.build_mindmap, analysis_data, analysis.custom_prompt)
 
+                if await self._is_cancelled(repo, user_id, analysis_id):
+                    return
+
                 # --- Paso 5: Generación de explicaciones ---
                 # Las explicaciones simplificadas ya vienen en metadata.summary desde build_mindmap
                 # (paso 4). Se eliminó la llamada por-nodo a gemini.simplify() porque disparaba una
@@ -178,6 +198,9 @@ class AnalysisService:
                     for f in all_fundamentos
                 ]
                 await repo.save_fundamentos(findings)
+
+                if await self._is_cancelled(repo, user_id, analysis_id):
+                    return
 
                 # --- Guardar resultados ---
                 await repo.update_analysis_results(

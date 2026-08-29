@@ -49,6 +49,12 @@ class AnalysisRepository(BaseRepository[Analysis]):
                 analysis.error_message = error
             await self.db.commit()
 
+    async def get_status(self, analysis_id: uuid.UUID) -> str | None:
+        # Lectura fresca del estado (select de columna, sin caché de la identity map),
+        # para que el pipeline pueda detectar una cancelación hecha en otra sesión.
+        result = await self.db.execute(select(Analysis.status).where(Analysis.id == analysis_id))
+        return result.scalar_one_or_none()
+
     async def update_mindmap(self, analysis_id: uuid.UUID, data: dict) -> None:
         analysis = await self.get_by_id(analysis_id)
         if analysis:
