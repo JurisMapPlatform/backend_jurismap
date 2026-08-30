@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.models.analysis import Analysis, AnalysisDocument
 from app.models.fundamento import AnalysisFundamento
@@ -59,6 +60,10 @@ class AnalysisRepository(BaseRepository[Analysis]):
         analysis = await self.get_by_id(analysis_id)
         if analysis:
             analysis.mind_map_data = data
+            # mind_map_data es una columna JSON: SQLAlchemy no detecta mutaciones in-place del
+            # dict (como las de generate/rename/delete node), así que marcamos el atributo como
+            # modificado para forzar el UPDATE y que los cambios persistan.
+            flag_modified(analysis, "mind_map_data")
             await self.db.commit()
 
     async def update_analysis_results(self, analysis_id: uuid.UUID, mind_map_data: dict, parties: dict, background: str) -> None:
