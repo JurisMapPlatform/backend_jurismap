@@ -54,7 +54,7 @@ async def send_verification_email(to_email: str, to_name: str, token: str) -> bo
     url = f"{settings.frontend_url}/verify-email?token={token}"
     html = _layout(
         "Verifica tu cuenta",
-        f"Hola {to_name or ''}, gracias por registrarte en JurisMap. Haz clic en el botón para activar tu cuenta.",
+        f"Hola {to_name or ''}, gracias por registrarte en JurisMap. Haz clic en el botón para activar tu cuenta. El enlace expira en 24 horas.",
         "Verificar mi cuenta", url,
     )
     return await _send(to_email, to_name, "Verifica tu cuenta en JurisMap", html)

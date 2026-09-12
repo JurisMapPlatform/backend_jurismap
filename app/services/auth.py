@@ -15,6 +15,29 @@ from app.schemas.auth import UserRegister, TokenResponse
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# HU-02: el enlace de verificación vence a las 24 horas. El vencimiento viaja dentro del propio
+# token ("<uuid>.<timestamp>"), así no hace falta una columna nueva en la base de datos.
+VERIFICATION_TTL = timedelta(hours=24)
+
+
+def new_verification_token(now: datetime | None = None) -> str:
+    now = now or datetime.now(timezone.utc)
+    expires = int((now + VERIFICATION_TTL).timestamp())
+    return f"{uuid.uuid4()}.{expires}"
+
+
+def verification_token_expired(token: str, created_at: datetime | None, now: datetime | None = None) -> bool:
+    now = now or datetime.now(timezone.utc)
+    _, sep, expires = token.rpartition(".")
+    if sep and expires.isdigit():
+        return now.timestamp() > int(expires)
+    # Tokens emitidos antes de este cambio (uuid sin vencimiento): vencen 24 h después del registro.
+    if created_at is None:
+        return False
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return now > created_at + VERIFICATION_TTL
+
 
 class AuthService:
     def __init__(self, db: AsyncSession):
@@ -29,7 +52,7 @@ class AuthService:
             email=data.email,
             hashed_password=pwd_context.hash(data.password),
             full_name=data.full_name,
-            verification_token=str(uuid.uuid4()),
+            verification_token=new_verification_token(),
         )
         user = await self.repo.create(user)
 
@@ -71,7 +94,11 @@ class AuthService:
     async def verify_email(self, token: str) -> bool:
         user = await self.repo.get_by_verification_token(token)
         if not user:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Token inválido")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="El enlace de verificación no es válido o ya fue usado.")
+        if verification_token_expired(token, user.created_at):
+            raise HTTPException(status_code=status.HTTP_410_GONE,
+                                detail="El enlace de verificación expiró. Inicia sesión para solicitar uno nuevo.")
         user.is_verified = True
         user.verification_token = None
         await self.repo.update(user)
@@ -83,7 +110,7 @@ class AuthService:
         user = await self.repo.get_by_email(email)
         if not user or user.is_verified or not user.hashed_password:
             return
-        user.verification_token = str(uuid.uuid4())
+        user.verification_token = new_verification_token()
         await self.repo.update(user)
 
         from app.services.email import send_verification_email
