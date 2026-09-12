@@ -122,8 +122,11 @@ class MindMapService:
             text = await asyncio.to_thread(extractor.extract_text, pdf_bytes)
             full_text += text + "\n"
             fundamentos = await asyncio.to_thread(extractor.extract_fundamentos, pdf_bytes)
+            # HU-12: página de cada fundamento y documento del que proviene.
+            await asyncio.to_thread(extractor.assign_pages, pdf_bytes, fundamentos)
             for f in fundamentos:
                 f["document_id"] = str(doc.id)
+                f["document_name"] = doc.original_filename
             all_fundamentos.extend(fundamentos)
 
         if not all_fundamentos:
@@ -170,6 +173,8 @@ class MindMapService:
             ],
         }
         mind_map = await asyncio.to_thread(gemini.build_mindmap, analysis_data, analysis.custom_prompt)
+        from app.services.analysis import enrich_fundamento_nodes
+        mind_map = enrich_fundamento_nodes(mind_map, fundamentos_for_map)
 
         # Las explicaciones simplificadas ya vienen en metadata.summary desde build_mindmap;
         # se eliminó la llamada por-nodo a gemini.simplify() para no agotar la cuota de Gemini.

@@ -37,6 +37,29 @@ def friendly_error(exc: Exception) -> str:
             "si el problema continúa, prueba con otro documento.")
 
 
+def enrich_fundamento_nodes(mind_map: dict, fundamentos: list[dict]) -> dict:
+    """HU-12: agrega a cada nodo de fundamento el documento y la página de donde proviene, para que
+    el modal identifique claramente su origen aunque el análisis tenga varias sentencias."""
+    by_num = {}
+    for f in fundamentos:
+        by_num.setdefault(f["fundamento_num"], f)
+    for node in (mind_map or {}).get("nodes", []):
+        metadata = node.get("metadata") or {}
+        try:
+            num = int(metadata.get("fundamento_num"))
+        except (TypeError, ValueError):
+            continue
+        source = by_num.get(num)
+        if not source:
+            continue
+        metadata["document_id"] = source.get("document_id")
+        metadata["document_name"] = source.get("document_name")
+        if source.get("page_number"):
+            metadata["page_number"] = source["page_number"]
+        node["metadata"] = metadata
+    return mind_map
+
+
 PROCESSING_STEPS = [
     "Lectura de documentos",
     "Clasificación con BETO",
@@ -123,8 +146,11 @@ class AnalysisService:
                     text = await asyncio.to_thread(extractor.extract_text, pdf_bytes)
                     full_text += text + "\n"
                     fundamentos = await asyncio.to_thread(extractor.extract_fundamentos, pdf_bytes)
+                    # HU-12: página de cada fundamento y documento del que proviene.
+                    await asyncio.to_thread(extractor.assign_pages, pdf_bytes, fundamentos)
                     for f in fundamentos:
                         f["document_id"] = str(doc_id)
+                        f["document_name"] = doc.original_filename
                     all_fundamentos.extend(fundamentos)
 
                 if not all_fundamentos:
@@ -196,6 +222,7 @@ class AnalysisService:
                     ],
                 }
                 mind_map = await asyncio.to_thread(gemini.build_mindmap, analysis_data, analysis.custom_prompt)
+                mind_map = enrich_fundamento_nodes(mind_map, fundamentos_for_map)
 
                 if await self._is_cancelled(repo, user_id, analysis_id):
                     return
@@ -219,6 +246,7 @@ class AnalysisService:
                         confidence=float(f.get("beto_confidence", 0.5)),
                         is_selected=f["fundamento_num"] in selected_nums,
                         simplified_text=summaries.get(f["fundamento_num"]) if f["fundamento_num"] in selected_nums else None,
+                        page_number=f.get("page_number"),
                     )
                     for f in all_fundamentos
                 ]

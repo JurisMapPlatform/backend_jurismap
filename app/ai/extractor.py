@@ -75,6 +75,21 @@ class PDFExtractor:
     def extract_entities(self, text: str) -> dict:
         return {"parties": {}, "background": "", "ruling": ""}
 
+    def assign_pages(self, pdf_bytes: bytes, fundamentos: list[dict]) -> None:
+        """HU-12: guarda en cada fundamento la página donde empieza (f["page_number"]).
+
+        Se comparan los textos con los espacios normalizados: el fundamento une sus líneas con
+        espacios y la página conserva los saltos de línea, así que una comparación literal casi
+        nunca coincide. Se busca por fundamento y no por número, porque una misma sentencia puede
+        repetir numeraciones (antecedentes y fundamentos)."""
+        reader = self._reader(pdf_bytes)
+        pages = [" ".join((page.extract_text() or "").split()) for page in reader.pages]
+        for fund in fundamentos:
+            preview = " ".join(fund.get("texto", "").split()[:8])
+            fund["page_number"] = next(
+                (num for num, text in enumerate(pages, 1) if preview and preview in text), None
+            )
+
     def get_page_mapping(self, pdf_bytes: bytes, fundamentos: list[dict]) -> dict[int, int]:
         reader = self._reader(pdf_bytes)
         page_map = {}

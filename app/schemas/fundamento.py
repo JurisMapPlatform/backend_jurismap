@@ -12,6 +12,7 @@ class FundamentoResponse(BaseModel):
     is_selected: bool
     simplified_text: str | None
     page_number: int | None
+    document_id: uuid.UUID | None = None
 
     model_config = {"from_attributes": True}
 
