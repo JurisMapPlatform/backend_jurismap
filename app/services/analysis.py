@@ -1,3 +1,5 @@
+import json
+import logging
 import uuid
 import asyncio
 from datetime import datetime
@@ -11,6 +13,29 @@ from app.repositories.analysis import AnalysisRepository
 from app.repositories.document import DocumentRepository
 from app.services.ws import ws_manager
 from app.schemas.analysis import AnalysisCreate
+
+logger = logging.getLogger(__name__)
+
+
+def friendly_error(exc: Exception) -> str:
+    """HU-32: traduce una excepción del pipeline a un mensaje claro para el estudiante, con una
+    sugerencia de qué hacer. El detalle técnico se registra en los logs, no se muestra al usuario."""
+    text = str(exc)
+    low = text.lower()
+    if isinstance(exc, ValueError) and "fundamentos" in low:
+        return ("No se encontraron fundamentos numerados en los documentos. Verifica que sean sentencias "
+                "del Tribunal Constitucional con texto seleccionable e inténtalo de nuevo.")
+    if isinstance(exc, json.JSONDecodeError) or "expecting value" in low or "json" in low:
+        return "La IA devolvió una respuesta incompleta. Vuelve a intentar el análisis en unos minutos."
+    if "429" in text or "resource exhausted" in low or "quota" in low or "max retries" in low:
+        return "El servicio de IA alcanzó su límite de uso por ahora. Espera unos minutos y vuelve a intentarlo."
+    if isinstance(exc, (TimeoutError, ConnectionError)) or any(
+        k in low for k in ("timeout", "timed out", "deadline", "unavailable", "connection")
+    ):
+        return "No se pudo conectar con el servicio de IA. Vuelve a intentarlo en unos minutos."
+    return ("Ocurrió un error inesperado al procesar el análisis. Vuelve a intentarlo; "
+            "si el problema continúa, prueba con otro documento.")
+
 
 PROCESSING_STEPS = [
     "Lectura de documentos",
@@ -213,11 +238,13 @@ class AnalysisService:
                 await self._notify(user_id, analysis_id, len(PROCESSING_STEPS), "completed")
 
             except Exception as e:
-                await repo.update_status(analysis_id, "failed", error=str(e))
+                logger.exception("Falló el análisis %s", analysis_id)
+                user_msg = friendly_error(e)
+                await repo.update_status(analysis_id, "failed", error=user_msg)
                 await ws_manager.send_progress(user_id, {
                     "analysis_id": str(analysis_id),
                     "status": "failed",
-                    "error": str(e),
+                    "error": user_msg,
                 })
 
     async def get_history(self, user_id: uuid.UUID, page: int = 1, page_size: int = 20):
