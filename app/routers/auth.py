@@ -104,3 +104,14 @@ async def reset_password(request: Request, data: ResetPasswordRequest, db: Async
                         "Requires a valid JWT token in the Authorization header.")
 async def get_me(current_user: User = Depends(get_current_user)):
     return current_user
+
+
+@router.post("/refresh", response_model=TokenResponse,
+             summary="Renew the access token",
+             description="Issues a new JWT for the authenticated user (HU-05). The frontend calls it "
+                         "periodically while the student is active, so the session only ends by "
+                         "inactivity and not in the middle of the work. Requires a valid token.")
+@limiter.limit("30/minute")
+async def refresh_token(request: Request, current_user: User = Depends(get_current_user),
+                        db: AsyncSession = Depends(get_db)):
+    return AuthService(db)._create_token(current_user)
