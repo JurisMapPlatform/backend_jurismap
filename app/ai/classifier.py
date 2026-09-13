@@ -98,9 +98,17 @@ class BETOClassifier:
         return results
 
     def classify_fundamentos(self, fundamentos: list[dict]) -> list[dict]:
-        total = len(fundamentos)
+        # Posición relativa DENTRO DE CADA SENTENCIA, como en el paper (ec. 1) y en el entrenamiento
+        # (04_prepare_dataset.py): total = número de fundamento más alto de esa sentencia. Con varios
+        # PDF, cada documento se mide por separado; antes se usaba la cantidad de bloques de todos
+        # los documentos juntos, una entrada distinta a la que el modelo vio al entrenar.
+        totales: dict = {}
+        for f in fundamentos:
+            doc = f.get("document_id")
+            totales[doc] = max(totales.get(doc, 0), f["fundamento_num"])
         texts = []
         for f in fundamentos:
+            total = totales[f.get("document_id")]
             pos_ratio = f["fundamento_num"] / total if total > 0 else 0
             if pos_ratio <= 0.15:
                 tag = "INICIO"
