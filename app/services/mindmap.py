@@ -112,21 +112,26 @@ class MindMapService:
         storage = StorageRepository()
         extractor = PDFExtractor()
 
+        from app.services.analysis import (
+            tag_fundamentos, select_candidates, prepare_map_fundamentos, map_payload, enrich_fundamento_nodes,
+            add_missing_fundamentos,
+        )
+
         all_fundamentos = []
         full_text = ""
+        doc_index = 0
         for link in detail.document_links:
             doc = await doc_repo.get_by_id(link.document_id)
             if not doc:
                 continue
+            doc_index += 1
             pdf_bytes = await storage.download(doc.storage_path)
             text = await asyncio.to_thread(extractor.extract_text, pdf_bytes)
             full_text += text + "\n"
             fundamentos = await asyncio.to_thread(extractor.extract_fundamentos, pdf_bytes)
             # HU-12: página de cada fundamento y documento del que proviene.
             await asyncio.to_thread(extractor.assign_pages, pdf_bytes, fundamentos)
-            for f in fundamentos:
-                f["document_id"] = str(doc.id)
-                f["document_name"] = doc.original_filename
+            tag_fundamentos(fundamentos, doc, doc_index)
             all_fundamentos.extend(fundamentos)
 
         if not all_fundamentos:
@@ -142,18 +147,22 @@ class MindMapService:
                 f["beto_confidence"] = 0.5
 
         gemini = GeminiClient()
-        selected = await asyncio.to_thread(gemini.analyze_fundamentos, all_fundamentos)
+        candidates = select_candidates(all_fundamentos)
+        selected = await asyncio.to_thread(gemini.analyze_fundamentos, candidates)
         parties = await asyncio.to_thread(gemini.extract_parties, full_text[:3000])
 
-        selected_nums = {s["n"] for s in selected}
-        _seen_nums = set()
-        fundamentos_for_map = []
+        fundamentos_for_map, summaries = prepare_map_fundamentos(candidates, selected)
+
+        # Los fundamentos se guardaron al crear el análisis: se enlaza cada bloque con su registro
+        # y se actualiza cuáles quedaron en el mapa regenerado.
+        chosen = {id(f) for f in fundamentos_for_map}
+        registros = {(str(r.document_id), r.fundamento_num, r.texto): r for r in detail.findings}
         for f in all_fundamentos:
-            n = f["fundamento_num"]
-            if n in selected_nums and n not in _seen_nums:
-                _seen_nums.add(n)
-                fundamentos_for_map.append(f)
-        summaries = {s["n"]: s["summary"] for s in selected}
+            registro = registros.get((f["document_id"], f["fundamento_num"], f["texto"]))
+            if registro:
+                f["finding_id"] = registro.id
+                registro.is_selected = id(f) in chosen
+                registro.simplified_text = summaries.get(f["ref"]) if id(f) in chosen else None
 
         fallo_text = extractor.extract_fallo(full_text)
 
@@ -162,19 +171,12 @@ class MindMapService:
             "parties": parties,
             "fallo_text": fallo_text,
             "full_text_preview": full_text[:2000],
-            "fundamentos": [
-                {
-                    "num": f["fundamento_num"],
-                    "texto": f["texto"][:800],
-                    "summary": summaries.get(f["fundamento_num"], ""),
-                    "beto_label": f.get("beto_label"),
-                }
-                for f in fundamentos_for_map
-            ],
+            "fundamentos": map_payload(fundamentos_for_map, summaries),
         }
         mind_map = await asyncio.to_thread(gemini.build_mindmap, analysis_data, analysis.custom_prompt)
-        from app.services.analysis import enrich_fundamento_nodes
-        mind_map = enrich_fundamento_nodes(mind_map, fundamentos_for_map)
+        if not analysis.custom_prompt:
+            mind_map = add_missing_fundamentos(mind_map, fundamentos_for_map, summaries)
+        mind_map = enrich_fundamento_nodes(mind_map, fundamentos_for_map, multi_doc=doc_index > 1)
 
         # Las explicaciones simplificadas ya vienen en metadata.summary desde build_mindmap;
         # se eliminó la llamada por-nodo a gemini.simplify() para no agotar la cuota de Gemini.

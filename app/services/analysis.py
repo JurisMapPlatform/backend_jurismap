@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import uuid
 import asyncio
 from datetime import datetime, timedelta
@@ -39,27 +40,155 @@ def friendly_error(exc: Exception) -> str:
             "si el problema continúa, prueba con otro documento.")
 
 
-def enrich_fundamento_nodes(mind_map: dict, fundamentos: list[dict]) -> dict:
-    """HU-12: agrega a cada nodo de fundamento el documento y la página de donde proviene, para que
-    el modal identifique claramente su origen aunque el análisis tenga varias sentencias."""
-    by_num = {}
+# Los números de fundamento se repiten: dentro de una sentencia (antecedentes, fundamentos y puntos
+# del fallo se numeran por separado) y entre sentencias. Por eso cada bloque extraído lleva una
+# referencia única "documento-número" (ref) y la sección donde aparece. El clasificador recibe
+# TODOS los bloques, igual que en su entrenamiento; después solo los de la sección de fundamentos
+# pasan a Gemini y al mapa.
+
+def tag_fundamentos(fundamentos: list[dict], doc, doc_index: int) -> None:
+    for f in fundamentos:
+        f["document_id"] = str(doc.id)
+        f["document_name"] = doc.original_filename
+        f["doc_index"] = doc_index
+        f["ref"] = f"{doc_index}-{f['fundamento_num']}"
+
+
+def select_candidates(fundamentos: list[dict]) -> list[dict]:
+    """Bloques que pueden llegar a Gemini y al mapa: los de la sección de fundamentos de cada
+    documento (todos los suyos si un documento no la tiene). Si una referencia se repite dentro
+    del documento (p. ej. dos sentencias en un mismo PDF), se queda el de mayor confianza."""
+    docs_con_seccion = {f["doc_index"] for f in fundamentos if f.get("section") == "fundamentos"}
+    best: dict[str, dict] = {}
+    for f in fundamentos:
+        if f["doc_index"] in docs_con_seccion and f.get("section") != "fundamentos":
+            continue
+        actual = best.get(f["ref"])
+        if actual is None or f.get("beto_confidence", 0) > actual.get("beto_confidence", 0):
+            best[f["ref"]] = f
+    elegidos = {id(f) for f in best.values()}
+    return [f for f in fundamentos if id(f) in elegidos]
+
+
+def prepare_map_fundamentos(candidates: list[dict], selected: list[dict]) -> tuple[list[dict], dict]:
+    """Fundamentos del mapa (en el orden de la sentencia) y sus resúmenes por referencia."""
+    summaries = {s["ref"]: s.get("summary", "") for s in selected}
+    return [f for f in candidates if f["ref"] in summaries], summaries
+
+
+def map_payload(fundamentos_for_map: list[dict], summaries: dict) -> list[dict]:
+    return [
+        {
+            "ref": f["ref"],
+            "num": f["fundamento_num"],
+            "documento": f["doc_index"],
+            "texto": f["texto"][:800],
+            "summary": summaries.get(f["ref"], ""),
+            "beto_label": f.get("beto_label"),
+        }
+        for f in fundamentos_for_map
+    ]
+
+
+def add_missing_fundamentos(mind_map: dict, fundamentos_for_map: list[dict], summaries: dict) -> dict:
+    """Gemini a veces omite al armar el mapa algunos de los fundamentos elegidos (p. ej. todos los
+    del segundo documento). En el modo predeterminado se agregan los que falten bajo la categoría
+    Fundamentos, con su resumen y su texto original, para que el mapa muestre todos los elegidos."""
+    if not mind_map:
+        return mind_map
+    nodes = mind_map.setdefault("nodes", [])
+    categoria = next((n for n in nodes if n.get("type") == "category" and (
+        "fundamento" in str(n.get("id", "")).lower() or "fundamento" in str(n.get("label", "")).lower())), None)
+    if categoria is None:
+        return mind_map
+
+    # Un nodo sin ref se enlaza por número al primer fundamento con ese número (igual que en
+    # enrich_fundamento_nodes), así que ese fundamento cuenta como presente.
+    by_num: dict[int, str] = {}
+    for f in fundamentos_for_map:
+        by_num.setdefault(f["fundamento_num"], f["ref"])
+    presentes = set()
+    for n in nodes:
+        md = n.get("metadata") or {}
+        if md.get("fundamento_ref"):
+            presentes.add(str(md["fundamento_ref"]).strip())
+        else:
+            try:
+                presentes.add(by_num.get(int(md.get("fundamento_num"))))
+            except (TypeError, ValueError):
+                pass
+
+    edges = mind_map.setdefault("edges", [])
+    for f in fundamentos_for_map:
+        if f["ref"] in presentes:
+            continue
+        node_id = "fund_" + f["ref"].replace("-", "_")
+        nodes.append({
+            "id": node_id,
+            "type": "fundamento",
+            "label": f"Fund. {f['fundamento_num']}",
+            "metadata": {"fundamento_ref": f["ref"], "fundamento_num": f["fundamento_num"],
+                         "summary": summaries.get(f["ref"], ""), "original": f["texto"]},
+        })
+        edges.append({"source": categoria["id"], "target": node_id})
+    return mind_map
+
+
+_FUND_LABEL = re.compile(r"^\s*Fund(?:amento)?\.?\s*\d+\s*$", re.IGNORECASE)
+
+
+def enrich_fundamento_nodes(mind_map: dict, fundamentos: list[dict], multi_doc: bool = False) -> dict:
+    """HU-12: enlaza cada nodo de fundamento con el bloque exacto del que proviene (finding_id,
+    documento y página), para que el modal muestre el texto y el origen correctos aunque el número
+    se repita. Con varios documentos, la etiqueta indica el documento ("Fund. 7 · Doc. 2")."""
+    by_ref = {f["ref"]: f for f in fundamentos if f.get("ref")}
+    by_num: dict[int, dict] = {}
     for f in fundamentos:
         by_num.setdefault(f["fundamento_num"], f)
     for node in (mind_map or {}).get("nodes", []):
         metadata = node.get("metadata") or {}
-        try:
-            num = int(metadata.get("fundamento_num"))
-        except (TypeError, ValueError):
-            continue
-        source = by_num.get(num)
+        source = by_ref.get(str(metadata.get("fundamento_ref", "")).strip())
+        if source is None:
+            try:
+                source = by_num.get(int(metadata.get("fundamento_num")))
+            except (TypeError, ValueError):
+                continue
         if not source:
             continue
+        metadata["fundamento_num"] = source["fundamento_num"]
         metadata["document_id"] = source.get("document_id")
         metadata["document_name"] = source.get("document_name")
+        if source.get("ref"):
+            metadata["fundamento_ref"] = source["ref"]
+        if source.get("finding_id"):
+            metadata["finding_id"] = str(source["finding_id"])
         if source.get("page_number"):
             metadata["page_number"] = source["page_number"]
         node["metadata"] = metadata
+        if multi_doc and source.get("doc_index") and _FUND_LABEL.match(node.get("label") or ""):
+            node["label"] = f"Fund. {source['fundamento_num']} · Doc. {source['doc_index']}"
+    _ensure_unique_node_ids(mind_map or {})
     return mind_map
+
+
+def _ensure_unique_node_ids(mind_map: dict) -> None:
+    """Si Gemini repite el id de un nodo (p. ej. "fund_7" en dos documentos), React Flow mezcla los
+    nodos. Se renombran los repetidos y se conectan al mismo padre que el original."""
+    edges = mind_map.setdefault("edges", [])
+    vistos: set[str] = set()
+    for node in mind_map.get("nodes", []):
+        nid = node.get("id")
+        if nid not in vistos:
+            vistos.add(nid)
+            continue
+        k = 2
+        while f"{nid}_{k}" in vistos:
+            k += 1
+        node["id"] = f"{nid}_{k}"
+        vistos.add(node["id"])
+        padre = next((e.get("source") for e in edges if e.get("target") == nid), None)
+        if padre:
+            edges.append({"source": padre, "target": node["id"]})
 
 
 PROCESSING_STEPS = [
@@ -219,19 +348,19 @@ class AnalysisService:
 
                 all_fundamentos = []
                 full_text = ""
+                doc_index = 0
                 for doc_id in doc_ids:
                     doc = await doc_repo.get_by_id(doc_id)
                     if not doc:
                         continue
+                    doc_index += 1
                     pdf_bytes = await storage.download(doc.storage_path)
                     text = await asyncio.to_thread(extractor.extract_text, pdf_bytes)
                     full_text += text + "\n"
                     fundamentos = await asyncio.to_thread(extractor.extract_fundamentos, pdf_bytes)
                     # HU-12: página de cada fundamento y documento del que proviene.
                     await asyncio.to_thread(extractor.assign_pages, pdf_bytes, fundamentos)
-                    for f in fundamentos:
-                        f["document_id"] = str(doc_id)
-                        f["document_name"] = doc.original_filename
+                    tag_fundamentos(fundamentos, doc, doc_index)
                     all_fundamentos.extend(fundamentos)
 
                 if not all_fundamentos:
@@ -261,7 +390,8 @@ class AnalysisService:
                 await repo.update_status(analysis_id, "processing", step=3)
 
                 gemini = GeminiClient()
-                selected = await asyncio.to_thread(gemini.analyze_fundamentos, all_fundamentos)
+                candidates = select_candidates(all_fundamentos)
+                selected = await asyncio.to_thread(gemini.analyze_fundamentos, candidates)
 
                 parties = await asyncio.to_thread(gemini.extract_parties, full_text[:3000])
 
@@ -272,15 +402,12 @@ class AnalysisService:
                 await self._notify(user_id, analysis_id, 4)
                 await repo.update_status(analysis_id, "processing", step=4)
 
-                selected_nums = {s["n"] for s in selected}
-                _seen_nums = set()
-                fundamentos_for_map = []
+                fundamentos_for_map, summaries = prepare_map_fundamentos(candidates, selected)
+                chosen = {id(f) for f in fundamentos_for_map}
+                multi_doc = doc_index > 1
+                # El id de cada registro se fija ahora para enlazar cada nodo con su fundamento exacto.
                 for f in all_fundamentos:
-                    n = f["fundamento_num"]
-                    if n in selected_nums and n not in _seen_nums:
-                        _seen_nums.add(n)
-                        fundamentos_for_map.append(f)
-                summaries = {s["n"]: s["summary"] for s in selected}
+                    f["finding_id"] = uuid.uuid4()
 
                 # El fallo (parte resolutiva) va al final de la sentencia y no es un fundamento
                 # numerado; se pasa aparte para que Gemini no lo infiera. Va temprano en el dict
@@ -292,18 +419,12 @@ class AnalysisService:
                     "parties": parties,
                     "fallo_text": fallo_text,
                     "full_text_preview": full_text[:2000],
-                    "fundamentos": [
-                        {
-                            "num": f["fundamento_num"],
-                            "texto": f["texto"][:800],
-                            "summary": summaries.get(f["fundamento_num"], ""),
-                            "beto_label": f.get("beto_label"),
-                        }
-                        for f in fundamentos_for_map
-                    ],
+                    "fundamentos": map_payload(fundamentos_for_map, summaries),
                 }
                 mind_map = await asyncio.to_thread(gemini.build_mindmap, analysis_data, analysis.custom_prompt)
-                mind_map = enrich_fundamento_nodes(mind_map, fundamentos_for_map)
+                if not analysis.custom_prompt:
+                    mind_map = add_missing_fundamentos(mind_map, fundamentos_for_map, summaries)
+                mind_map = enrich_fundamento_nodes(mind_map, fundamentos_for_map, multi_doc)
 
                 if await self._is_cancelled(repo, user_id, analysis_id):
                     return
@@ -319,14 +440,15 @@ class AnalysisService:
                 # si fue seleccionado, y su explicación). Alimenta el detalle del análisis y el PDF.
                 findings = [
                     AnalysisFundamento(
+                        id=f["finding_id"],
                         analysis_id=analysis_id,
                         document_id=uuid.UUID(f["document_id"]),
                         fundamento_num=f["fundamento_num"],
                         texto=f["texto"],
                         label=f.get("beto_label", "RELEVANTE"),
                         confidence=float(f.get("beto_confidence", 0.5)),
-                        is_selected=f["fundamento_num"] in selected_nums,
-                        simplified_text=summaries.get(f["fundamento_num"]) if f["fundamento_num"] in selected_nums else None,
+                        is_selected=id(f) in chosen,
+                        simplified_text=summaries.get(f["ref"]) if id(f) in chosen else None,
                         page_number=f.get("page_number"),
                     )
                     for f in all_fundamentos

@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import time
+from itertools import zip_longest
 
 import vertexai
 from vertexai.generative_models import GenerativeModel
@@ -48,26 +49,46 @@ class GeminiClient:
             raise
 
     def analyze_fundamentos(self, fundamentos: list[dict]) -> list[dict]:
+        """Devuelve [{"ref", "n", "summary"}] con los fundamentos elegidos para el mapa.
+
+        Cada fundamento se identifica por su "ref" ("documento-número"): el número solo se repite
+        entre documentos distintos. Si no trae "ref" (llamadas antiguas) se usa el número."""
         # --- Etapa 1: RoBERTalex define el universo de candidatos (filtro de relevancia) ---
-        # Un fundamento puede aparecer varias veces en el PDF; se de-duplica por número
-        # quedándose con la instancia de MAYOR confianza. Luego se toman los RELEVANTE
-        # ordenados por confianza (top N). Gemini SOLO verá estos candidatos.
-        by_num: dict[int, dict] = {}
+        # Si una referencia se repite, se queda la instancia de MAYOR confianza. Luego se toman
+        # los RELEVANTE ordenados por confianza (top N). Gemini SOLO verá estos candidatos.
+        by_ref: dict[str, dict] = {}
         for f in fundamentos:
-            n = f["fundamento_num"]
-            if n not in by_num or f.get("beto_confidence", 0) > by_num[n].get("beto_confidence", 0):
-                by_num[n] = f
-        unicos = list(by_num.values())
+            ref = f.get("ref") or str(f["fundamento_num"])
+            if ref not in by_ref or f.get("beto_confidence", 0) > by_ref[ref].get("beto_confidence", 0):
+                by_ref[ref] = f
+        unicos = list(by_ref.values())
         relevantes = sorted(
             [f for f in unicos if f.get("beto_label") == "RELEVANTE"],
             key=lambda f: f.get("beto_confidence", 0.0), reverse=True,
         )
         # Si el clasificador no marcó ninguno como RELEVANTE, se usan los de mayor confianza.
-        candidatos = (relevantes or sorted(unicos, key=lambda f: f.get("beto_confidence", 0.0), reverse=True))
-        candidatos = candidatos[:MAX_FUNDAMENTO_CANDIDATOS]
+        ordenados = (relevantes or sorted(unicos, key=lambda f: f.get("beto_confidence", 0.0), reverse=True))
+        docs = sorted({f.get("doc_index", 1) for f in ordenados})
+        if len(docs) > 1:
+            # Con varias sentencias, los candidatos se reparten por turnos entre documentos (cada uno
+            # en orden de confianza), para que ninguna quede fuera solo porque otra tiene
+            # confianzas un poco más altas.
+            colas = [[f for f in ordenados if f.get("doc_index", 1) == d] for d in docs]
+            ordenados = [f for turno in zip_longest(*colas) for f in turno if f]
+        candidatos = ordenados[:MAX_FUNDAMENTO_CANDIDATOS]
+        n_docs = len({f.get("doc_index", 1) for f in candidatos})
+        varios_docs = n_docs > 1
+        regla_docs = (f"\n- Los candidatos provienen de {n_docs} sentencias distintas: incluye fundamentos de CADA una "
+                      "(al menos 2 por sentencia), porque el estudiante necesita entenderlas todas."
+                      if varios_docs else "")
+
+        def etiqueta(f):
+            ref = f.get("ref") or str(f["fundamento_num"])
+            origen = f" del documento {f.get('doc_index', 1)}" if varios_docs else ""
+            return f"[Ref. {ref}] Fund. {f['fundamento_num']}{origen}"
 
         cand_text = "\n".join(
-            f"[Fund. {f['fundamento_num']}] (confianza RoBERTalex: {f.get('beto_confidence', 0):.2f}) {f['texto'][:500]}"
+            f"{etiqueta(f)} (confianza RoBERTalex: {f.get('beto_confidence', 0):.2f}) {f['texto'][:500]}"
             for f in candidatos
         )
 
@@ -81,17 +102,35 @@ De ESTOS candidatos, selecciona los MÁS IMPORTANTES para entender el razonamien
 REGLAS:
 - Elige entre 5 y 15 fundamentos; idealmente alrededor de 8. NUNCA más de 15.
 - Ordénalos de MÁS a MENOS importante.
-- Usa ÚNICAMENTE números que aparezcan en la lista de candidatos; no inventes números.
+- Identifica cada fundamento por su referencia ("Ref."), copiada EXACTAMENTE. Usa ÚNICAMENTE referencias que aparezcan en la lista de candidatos; no inventes referencias.{regla_docs}
 
 Responde SOLO con JSON, en orden de importancia:
-[{{"n": 12, "summary": "resumen breve y claro del fundamento"}}]"""
+[{{"ref": "1-12", "summary": "resumen breve y claro del fundamento"}}]"""
 
         text = self._generate(prompt)
-        result = self._parse_json(text)
-        if isinstance(result, list):
-            # Tope duro: nunca más de MAX_FUNDAMENTOS_MAPA, aunque Gemini se pase.
-            return result[:MAX_FUNDAMENTOS_MAPA]
-        return result
+        return self._normalize_selection(self._parse_json(text), candidatos)
+
+    @staticmethod
+    def _normalize_selection(result, candidatos: list[dict]) -> list[dict]:
+        """Valida la respuesta de Gemini: solo referencias de la lista de candidatos, sin repetir,
+        y como máximo MAX_FUNDAMENTOS_MAPA (tope duro aunque Gemini se pase)."""
+        if isinstance(result, dict):
+            result = next((v for v in result.values() if isinstance(v, list)), [])
+        validos = {(f.get("ref") or str(f["fundamento_num"])): f for f in candidatos}
+        docs = {f.get("doc_index", 1) for f in candidatos}
+        elegidos, vistos = [], set()
+        for item in result if isinstance(result, list) else []:
+            if not isinstance(item, dict):
+                continue
+            ref = str(item.get("ref", item.get("n", ""))).replace("Ref.", "").strip()
+            # Con un solo documento, Gemini a veces responde solo el número del fundamento.
+            if ref not in validos and len(docs) == 1 and ref.isdigit():
+                ref = f"{next(iter(docs))}-{ref}"
+            if ref in validos and ref not in vistos:
+                vistos.add(ref)
+                elegidos.append({"ref": ref, "n": validos[ref]["fundamento_num"],
+                                 "summary": item.get("summary", "")})
+        return elegidos[:MAX_FUNDAMENTOS_MAPA]
 
     def simplify(self, texto: str) -> str:
         prompt = f"""Simplifica el siguiente fundamento jurídico para que un estudiante de derecho
@@ -112,7 +151,8 @@ Responde SOLO con el texto simplificado."""
 1. El "label" de cada sub-nodo debe ser un TÍTULO de MÁXIMO 3 PALABRAS. Ejemplos: "Principio proporcionalidad", "Cese acto lesivo", "Derecho al trabajo". Para fundamentos usa "Fund. N" donde N es el número del fundamento.
 2. NUNCA pongas párrafos ni oraciones en el "label". El texto largo va SOLO en metadata.summary (explicación simplificada) y metadata.original (texto exacto de la sentencia).
 3. El nodo raíz tiene type "central"; las categorías type "category"; los fundamentos type "fundamento"; los demás type "detail".
-4. Responde SOLO con JSON válido (claves "nodes" y "edges"), sin texto adicional ni markdown."""
+4. Responde SOLO con JSON válido (claves "nodes" y "edges"), sin texto adicional ni markdown.
+5. Cada nodo de fundamento usa como "id" "fund_" más su "ref" con el guion cambiado por guion bajo (ref "1-12" -> "fund_1_12"), y en metadata copia "fundamento_ref" (la "ref" EXACTA) y "fundamento_num" (el "num")."""
 
         if custom_prompt:
             prompt = f"""Eres un experto en derecho constitucional peruano. Genera un mapa mental en JSON de la siguiente sentencia.
@@ -138,11 +178,11 @@ Ejemplo de formato de salida (la ESTRUCTURA real depende SOLO de lo que pida el 
   "nodes": [
     {{"id": "root", "type": "central", "label": "{expediente}"}},
     {{"id": "fundamentos", "type": "category", "label": "Fundamentos"}},
-    {{"id": "fund_1", "type": "fundamento", "label": "Fund. 1", "metadata": {{"fundamento_num": 1, "summary": "explicación simplificada", "original": "texto completo del fundamento"}}}}
+    {{"id": "fund_1_1", "type": "fundamento", "label": "Fund. 1", "metadata": {{"fundamento_ref": "1-1", "fundamento_num": 1, "summary": "explicación simplificada", "original": "texto completo del fundamento"}}}}
   ],
   "edges": [
     {{"source": "root", "target": "fundamentos"}},
-    {{"source": "fundamentos", "target": "fund_1"}}
+    {{"source": "fundamentos", "target": "fund_1_1"}}
   ]
 }}
 
@@ -155,11 +195,11 @@ Datos:
 
 {reglas_comunes}
 
-5. DEBES incluir EXACTAMENTE estas 6 categorías como nodos hijos del nodo raíz, NI MÁS NI MENOS:
+6. DEBES incluir EXACTAMENTE estas 6 categorías como nodos hijos del nodo raíz, NI MÁS NI MENOS:
    - materia, partes, pretension, antecedentes, fundamentos, fallo
-6. Cada categoría DEBE tener al menos 1 sub-nodo.
-7. PROHIBIDO incluir un nodo de "Votos singulares" o similar. NUNCA lo agregues en este modo predeterminado.
-8. Para la categoría "fallo" USA el campo "fallo_text" de los datos (es la parte resolutiva real al final de la sentencia, p. ej. "HA RESUELTO ..."). Crea 1 SOLO nodo (MÁXIMO 2) para el fallo: pon el sentido general de la decisión en el "label" (MÁX 3 palabras, p. ej. "Fundada en parte", "Improcedente") y copia TODO el texto resolutivo EXACTO en metadata.original, con una explicación en metadata.summary. Usa 2 nodos SOLO si hay dos sentidos claramente distintos (p. ej. una parte fundada y otra infundada); NUNCA más de 2, aunque el fallo tenga varios puntos numerados (agrúpalos). NUNCA inventes el fallo: si "fallo_text" viene vacío o sin resolución clara, dilo en el summary.
+7. Cada categoría DEBE tener al menos 1 sub-nodo. La categoría "fundamentos" tiene UN nodo por CADA elemento de la lista "fundamentos" de los datos, sin omitir ninguno (incluidos los de todos los documentos).
+8. PROHIBIDO incluir un nodo de "Votos singulares" o similar. NUNCA lo agregues en este modo predeterminado.
+9. Para la categoría "fallo" USA el campo "fallo_text" de los datos (es la parte resolutiva real al final de la sentencia, p. ej. "HA RESUELTO ..."). Crea 1 SOLO nodo (MÁXIMO 2) para el fallo: pon el sentido general de la decisión en el "label" (MÁX 3 palabras, p. ej. "Fundada en parte", "Improcedente") y copia TODO el texto resolutivo EXACTO en metadata.original, con una explicación en metadata.summary. Usa 2 nodos SOLO si hay dos sentidos claramente distintos (p. ej. una parte fundada y otra infundada); NUNCA más de 2, aunque el fallo tenga varios puntos numerados (agrúpalos). NUNCA inventes el fallo: si "fallo_text" viene vacío o sin resolución clara, dilo en el summary.
 
 JSON (responde SOLO esto, nada más):
 {{
@@ -175,7 +215,7 @@ JSON (responde SOLO esto, nada más):
     {{"id": "antecedentes", "type": "category", "label": "Antecedentes"}},
     {{"id": "antecedentes_1", "type": "detail", "label": "Título 3 palabras", "metadata": {{"summary": "explicación del antecedente", "original": "texto de la sentencia"}}}},
     {{"id": "fundamentos", "type": "category", "label": "Fundamentos"}},
-    {{"id": "fund_1", "type": "fundamento", "label": "Fund. 1", "metadata": {{"fundamento_num": 1, "summary": "explicación simplificada del fundamento", "original": "texto COMPLETO del fundamento tal como aparece en la sentencia"}}}},
+    {{"id": "fund_1_1", "type": "fundamento", "label": "Fund. 1", "metadata": {{"fundamento_ref": "1-1", "fundamento_num": 1, "summary": "explicación simplificada del fundamento", "original": "texto COMPLETO del fundamento tal como aparece en la sentencia"}}}},
     {{"id": "fallo", "type": "category", "label": "Fallo"}},
     {{"id": "fallo_1", "type": "detail", "label": "Infundada", "metadata": {{"summary": "se declara infundada la demanda", "original": "texto del fallo"}}}}
   ],
@@ -191,7 +231,7 @@ JSON (responde SOLO esto, nada más):
     {{"source": "partes", "target": "partes_ddo"}},
     {{"source": "pretension", "target": "pretension_1"}},
     {{"source": "antecedentes", "target": "antecedentes_1"}},
-    {{"source": "fundamentos", "target": "fund_1"}},
+    {{"source": "fundamentos", "target": "fund_1_1"}},
     {{"source": "fallo", "target": "fallo_1"}}
   ]
 }}

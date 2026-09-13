@@ -14,6 +14,27 @@ class PDFExtractor:
     FALLO_PRIMARY = re.compile(r"\bHA\s+RESUELTO\b")
     FALLO_SECONDARY = re.compile(r"\b(SE\s+RESUELVE|RESUELVE|HA\s+DECIDIDO|SE\s+DECIDE|FALLA)\b")
 
+    # Encabezados de sección de las sentencias del TC: línea completa y en MAYÚSCULAS, con numeración
+    # opcional ("II. FUNDAMENTOS"; "11." es la lectura errónea de "II." en algunos PDF) y, en los
+    # índices, el número de página al final ("II. FUNDAMENTOS 8").
+    _PREFIX = r"^(?:[IVXL1]+\s*[.\-]\s*)?"
+    SECTION_HEADERS = (
+        ("antecedentes", re.compile(_PREFIX + r"ANTECEDENTES(?:\s+\d+)?$")),
+        ("fundamentos", re.compile(_PREFIX + r"FUNDAMENTOS(?:\s+JUR[IÍ]DICOS)?(?:\s+\d+)?$")),
+        ("fallo", re.compile(_PREFIX + r"(?:FALLO|FALLA|HA\s+RESUELTO|SE\s+RESUELVE|RESUELVE)(?:\s+\d+)?\s*:?$")),
+        ("voto", re.compile(r"^(?:FUNDAMENTOS?\s+(?:DE\s+)?)?VOTO\s+(?:SINGULAR|DIRIMENTE|DEL?|DE\s+LOS?|DE\s+LA)\b")),
+    )
+
+    @classmethod
+    def _section_of(cls, line: str) -> str | None:
+        text = " ".join(line.split())
+        if not text or len(text) > 120:
+            return None
+        for section, pattern in cls.SECTION_HEADERS:
+            if pattern.match(text):
+                return section
+        return None
+
     def _reader(self, pdf_bytes: bytes) -> PdfReader:
         return PdfReader(io.BytesIO(pdf_bytes))
 
@@ -37,23 +58,42 @@ class PDFExtractor:
         return "\n".join(full_text)
 
     def extract_fundamentos(self, pdf_bytes: bytes) -> list[dict]:
+        """Extrae todos los párrafos numerados de la sentencia.
+
+        Los bloques (número y texto) son exactamente los mismos con los que se entrenó el
+        clasificador, que también incluyen antecedentes, puntos del fallo y votos. Además, cada
+        bloque indica en `section` la parte de la sentencia donde empieza, para que después solo
+        los de "fundamentos" lleguen a Gemini y al mapa."""
         full_text = self.extract_text(pdf_bytes)
+        lines = full_text.split("\n")
+        # Sin encabezado FUNDAMENTOS (p. ej. autos con "considerandos"), todo lo que no sea fallo
+        # ni voto se trata como fundamento, igual que antes.
+        has_header = any(self._section_of(line) == "fundamentos" for line in lines)
+        section = "antecedentes" if has_header else "fundamentos"
+
         fundamentos = []
         current_num = None
         current_text = []
+        current_section = section
 
-        for line in full_text.split("\n"):
+        for line in lines:
+            header = self._section_of(line)
+            if header and (has_header or header != "antecedentes"):
+                section = header
             match = self.FUND_PATTERN.match(line)
             if match:
                 if current_num is not None and len(" ".join(current_text).split()) >= 20:
-                    fundamentos.append({"fundamento_num": current_num, "texto": " ".join(current_text).strip()})
+                    fundamentos.append({"fundamento_num": current_num, "texto": " ".join(current_text).strip(),
+                                        "section": current_section})
                 current_num = int(match.group(1))
                 current_text = [match.group(2).strip()]
+                current_section = section
             elif current_num is not None:
                 current_text.append(line.strip())
 
         if current_num is not None and len(" ".join(current_text).split()) >= 20:
-            fundamentos.append({"fundamento_num": current_num, "texto": " ".join(current_text).strip()})
+            fundamentos.append({"fundamento_num": current_num, "texto": " ".join(current_text).strip(),
+                                "section": current_section})
 
         return fundamentos
 
