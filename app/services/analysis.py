@@ -305,6 +305,14 @@ class AnalysisService:
             return True
         return False
 
+    async def _advance(self, repo, user_id: str, analysis_id: uuid.UUID, step: int) -> bool:
+        """Pasa al paso `step` solo si el análisis sigue activo. Si el estudiante lo canceló (incluso
+        estando pendiente), el pipeline se detiene sin volver a marcarlo como 'processing'."""
+        if await repo.advance_step(analysis_id, step):
+            return True
+        await self._is_cancelled(repo, user_id, analysis_id)  # avisa por WebSocket si fue cancelado
+        return False
+
     async def _notify(self, user_id: str, analysis_id: uuid.UUID, step: int, step_status: str = "processing"):
         await ws_manager.send_progress(user_id, {
             "analysis_id": str(analysis_id),
@@ -335,11 +343,13 @@ class AnalysisService:
             doc_repo = DocumentRepository(db)
 
             try:
-                await repo.update_status(analysis_id, "processing", step=0)
+                if not await self._advance(repo, user_id, analysis_id, 0):
+                    return
 
                 # --- Paso 1: Lectura de documentos ---
+                if not await self._advance(repo, user_id, analysis_id, 1):
+                    return
                 await self._notify(user_id, analysis_id, 1)
-                await repo.update_status(analysis_id, "processing", step=1)
 
                 analysis = await repo.get_detail(analysis_id)
                 doc_ids = [link.document_id for link in analysis.document_links]
@@ -370,8 +380,9 @@ class AnalysisService:
                     return
 
                 # --- Paso 2: Clasificación con BETO ---
+                if not await self._advance(repo, user_id, analysis_id, 2):
+                    return
                 await self._notify(user_id, analysis_id, 2)
-                await repo.update_status(analysis_id, "processing", step=2)
 
                 def _classify():
                     return get_classifier().classify_fundamentos(all_fundamentos)
@@ -386,8 +397,9 @@ class AnalysisService:
                     return
 
                 # --- Paso 3: Análisis con Gemini ---
+                if not await self._advance(repo, user_id, analysis_id, 3):
+                    return
                 await self._notify(user_id, analysis_id, 3)
-                await repo.update_status(analysis_id, "processing", step=3)
 
                 gemini = GeminiClient()
                 candidates = select_candidates(all_fundamentos)
@@ -399,8 +411,9 @@ class AnalysisService:
                     return
 
                 # --- Paso 4: Construcción del mapa mental ---
+                if not await self._advance(repo, user_id, analysis_id, 4):
+                    return
                 await self._notify(user_id, analysis_id, 4)
-                await repo.update_status(analysis_id, "processing", step=4)
 
                 fundamentos_for_map, summaries = prepare_map_fundamentos(candidates, selected)
                 chosen = {id(f) for f in fundamentos_for_map}
@@ -433,8 +446,9 @@ class AnalysisService:
                 # Las explicaciones simplificadas ya vienen en metadata.summary desde build_mindmap
                 # (paso 4). Se eliminó la llamada por-nodo a gemini.simplify() porque disparaba una
                 # petición extra a Gemini por cada fundamento, agotando la cuota tras pocos análisis.
+                if not await self._advance(repo, user_id, analysis_id, 5):
+                    return
                 await self._notify(user_id, analysis_id, 5)
-                await repo.update_status(analysis_id, "processing", step=5)
 
                 # Persistir la clasificación de cada fundamento (label/confianza de RoBERTalex,
                 # si fue seleccionado, y su explicación). Alimenta el detalle del análisis y el PDF.
@@ -505,8 +519,9 @@ class AnalysisService:
         analysis = await self.analysis_repo.get_by_id(analysis_id)
         if not analysis or analysis.user_id != user_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No se encontró el análisis. Es posible que se haya eliminado; revisa tu historial.")
-        if analysis.status != "processing":
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Solo se puede cancelar un análisis en proceso. Es posible que ya haya terminado; revisa tu historial.")
+        # También se puede cancelar mientras está pendiente (recién creado, antes del primer paso).
+        if analysis.status not in ACTIVE_STATUSES:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Solo se puede cancelar un análisis que aún no termina. Es posible que ya haya terminado; revisa tu historial.")
         await self.analysis_repo.update_status(analysis_id, "cancelled")
 
     async def get_stats(self, user_id: uuid.UUID) -> dict:

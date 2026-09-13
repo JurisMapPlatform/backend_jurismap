@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
@@ -49,6 +49,19 @@ class AnalysisRepository(BaseRepository[Analysis]):
             if error is not None:
                 analysis.error_message = error
             await self.db.commit()
+
+    async def advance_step(self, analysis_id: uuid.UUID, step: int) -> bool:
+        """Pasa el análisis a 'processing' en el paso `step` solo si sigue pendiente o en proceso.
+        Es una sola sentencia UPDATE condicional: si el estudiante lo canceló (aunque sea antes de
+        que empezara), no se sobrescribe. Devuelve False si el análisis ya no está activo."""
+        result = await self.db.execute(
+            update(Analysis)
+            .where(Analysis.id == analysis_id, Analysis.status.in_(("pending", "processing")))
+            .values(status="processing", processing_step=step)
+            .execution_options(synchronize_session=False)
+        )
+        await self.db.commit()
+        return result.rowcount > 0
 
     async def get_status(self, analysis_id: uuid.UUID) -> str | None:
         # Lectura fresca del estado (select de columna, sin caché de la identity map),
