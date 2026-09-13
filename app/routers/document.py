@@ -52,11 +52,19 @@ async def upload_document(
 
     safe_filename = _sanitize_filename(file.filename)
 
+    # Un PDF sin texto legible no se puede analizar: se rechaza ANTES de guardarlo, para no dejar en
+    # Cloud Storage ni en la BD archivos que nunca se usarán.
     extractor = _get_extractor()
     is_valid, page_count = await asyncio.to_thread(extractor.is_readable, content)
-    validation = DocumentValidation(is_valid=is_valid, page_count=page_count)
     if not is_valid:
-        validation.error = "El PDF no contiene texto extraíble (posiblemente escaneado sin OCR)"
+        if page_count == 0:
+            detail = ("No se pudo leer el PDF: puede estar dañado o protegido con contraseña. "
+                      "Ábrelo en tu computadora, guárdalo de nuevo como PDF e inténtalo otra vez.")
+        else:
+            detail = ("El PDF no tiene texto seleccionable (parece un documento escaneado). "
+                      "Sube una versión con texto o aplícale OCR antes de subirlo.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+    validation = DocumentValidation(is_valid=True, page_count=page_count)
 
     storage = StorageRepository()
     storage_path = await storage.upload(content, safe_filename, current_user.id)
