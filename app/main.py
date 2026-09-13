@@ -1,4 +1,6 @@
 import asyncio
+import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,10 +12,38 @@ from slowapi.errors import RateLimitExceeded
 from app.config import settings
 from app.routers import auth, analysis, mindmap, document, export
 from app.services.ws import ws_manager
+from app.services.analysis import recover_stale_analyses, fail_running_analyses
 
+logger = logging.getLogger(__name__)
 limiter = Limiter(key_func=get_remote_address)
 
+SWEEP_SECONDS = 120
+
+
+async def _sweep_stale_analyses():
+    # Al arrancar y cada 2 minutos: falla los análisis que otra instancia dejó a medias.
+    while True:
+        try:
+            await recover_stale_analyses(settings.analysis_stale_minutes)
+        except Exception:
+            logger.exception("No se pudo revisar los análisis interrumpidos")
+        await asyncio.sleep(SWEEP_SECONDS)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    sweeper = asyncio.create_task(_sweep_stale_analyses())
+    yield
+    sweeper.cancel()
+    # Cloud Run avisa antes de apagar la instancia: los análisis que corrían aquí no terminarán.
+    try:
+        await fail_running_analyses()
+    except Exception:
+        logger.exception("No se pudo marcar los análisis en curso al apagar")
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="JurisMap API",
     description="Plataforma que combina **Deep Learning (BETO)** e **IA Generativa (Gemini 2.5 Flash)** "
                 "para analizar sentencias del Tribunal Constitucional del Perú y generar "

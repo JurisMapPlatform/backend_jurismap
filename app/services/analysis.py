@@ -2,11 +2,13 @@ import json
 import logging
 import uuid
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import HTTPException, status
+from sqlalchemy import func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models.analysis import Analysis, AnalysisDocument
 from app.models.fundamento import AnalysisFundamento
 from app.repositories.analysis import AnalysisRepository
@@ -68,6 +70,74 @@ PROCESSING_STEPS = [
     "Generación de explicaciones",
 ]
 
+# El pipeline corre como tarea en segundo plano dentro de la instancia. Si Cloud Run la recicla
+# o se despliega una nueva revisión, la tarea muere sin pasar por el except y el análisis quedaría
+# en "processing" para siempre. Para detectarlo, cada análisis vivo actualiza su updated_at
+# periódicamente (latido) y un barrido marca como fallidos los que dejaron de latir.
+ACTIVE_STATUSES = ("pending", "processing")
+INTERRUPTED_MSG = ("El análisis se interrumpió porque el servidor se reinició. Vuelve a intentarlo; "
+                   "tus documentos siguen guardados.")
+
+# Análisis que se procesan en ESTA instancia, para marcarlos como fallidos si se apaga.
+RUNNING_ANALYSES: set[uuid.UUID] = set()
+# asyncio solo guarda referencias débiles a las tareas: sin esto, una tarea podría ser
+# recolectada por el garbage collector a mitad del análisis.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+async def _heartbeat(analysis_id: uuid.UUID) -> None:
+    from app.database import async_session
+
+    while True:
+        await asyncio.sleep(settings.analysis_heartbeat_seconds)
+        try:
+            async with async_session() as db:
+                await db.execute(
+                    update(Analysis)
+                    .where(Analysis.id == analysis_id, Analysis.status.in_(ACTIVE_STATUSES))
+                    .values(updated_at=func.now())
+                    .execution_options(synchronize_session=False)
+                )
+                await db.commit()
+        except Exception:
+            logger.warning("No se pudo registrar el latido del análisis %s", analysis_id, exc_info=True)
+
+
+async def _mark_interrupted(condition) -> int:
+    """Marca como fallidos los análisis activos que cumplen `condition` y avisa a sus dueños."""
+    from app.database import async_session
+
+    async with async_session() as db:
+        result = await db.execute(
+            update(Analysis)
+            .where(Analysis.status.in_(ACTIVE_STATUSES), condition)
+            .values(status="failed", error_message=INTERRUPTED_MSG)
+            .returning(Analysis.id, Analysis.user_id)
+            .execution_options(synchronize_session=False)
+        )
+        rows = result.all()
+        await db.commit()
+    for analysis_id, user_id in rows:
+        logger.warning("El análisis %s se interrumpió; se marcó como fallido", analysis_id)
+        await ws_manager.send_progress(str(user_id), {
+            "analysis_id": str(analysis_id),
+            "status": "failed",
+            "error": INTERRUPTED_MSG,
+        })
+    return len(rows)
+
+
+async def recover_stale_analyses(stale_minutes: int) -> int:
+    """Barrido: falla los análisis activos cuyo latido no se actualiza hace `stale_minutes`."""
+    return await _mark_interrupted(Analysis.updated_at < func.now() - timedelta(minutes=stale_minutes))
+
+
+async def fail_running_analyses() -> int:
+    """Al apagarse la instancia: falla los análisis que se estaban procesando en ella."""
+    if not RUNNING_ANALYSES:
+        return 0
+    return await _mark_interrupted(Analysis.id.in_(list(RUNNING_ANALYSES)))
+
 
 class AnalysisService:
     def __init__(self, db: AsyncSession):
@@ -93,7 +163,9 @@ class AnalysisService:
             self.db.add(link)
         await self.db.commit()
 
-        asyncio.create_task(self._process(analysis.id, str(user_id)))
+        task = asyncio.create_task(self._process(analysis.id, str(user_id)))
+        _BACKGROUND_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_TASKS.discard)
         return analysis
 
     async def _is_cancelled(self, repo, user_id: str, analysis_id: uuid.UUID) -> bool:
@@ -114,6 +186,15 @@ class AnalysisService:
         })
 
     async def _process(self, analysis_id: uuid.UUID, user_id: str):
+        RUNNING_ANALYSES.add(analysis_id)
+        heartbeat = asyncio.create_task(_heartbeat(analysis_id))
+        try:
+            await self._run_pipeline(analysis_id, user_id)
+        finally:
+            heartbeat.cancel()
+            RUNNING_ANALYSES.discard(analysis_id)
+
+    async def _run_pipeline(self, analysis_id: uuid.UUID, user_id: str):
         from app.database import async_session
         from app.ai.extractor import PDFExtractor
         from app.ai.classifier import get_classifier

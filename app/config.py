@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     beto_model_gcs_prefix: str = "models/best_model"
     frontend_url: str = "http://localhost:5173"
 
+    # Un análisis en proceso cuyo latido lleva más de estos minutos sin actualizarse se da por
+    # interrumpido (p. ej. Cloud Run recicló la instancia) y se marca como fallido.
+    analysis_stale_minutes: int = 5
+    analysis_heartbeat_seconds: int = 60
+
     max_upload_size_mb: int = 50
     local_storage_path: str = str(Path(__file__).parent.parent / "storage")
     allowed_extensions: list[str] = [".pdf"]
