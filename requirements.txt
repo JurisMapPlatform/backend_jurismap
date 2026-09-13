@@ -9,11 +9,11 @@ python-jose[cryptography]==3.5.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 python-multipart==0.0.32
-python-dotenv==1.0.1
+python-dotenv==1.2.2
 pydantic-settings==2.5.0
-google-cloud-aiplatform==1.72.0
-google-cloud-storage==2.18.0
-google-auth==2.35.0
+google-cloud-aiplatform==1.158.0
+google-cloud-storage==3.12.0
+google-auth==2.55.0
 httpx==0.28.1
 transformers==4.46.0
 torch==2.5.0
