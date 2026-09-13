@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
@@ -111,10 +111,24 @@ class AnalysisRepository(BaseRepository[Analysis]):
         }
 
     async def search(self, user_id: uuid.UUID, query: str) -> list[Analysis]:
+        # HU-25: busca por el título del análisis o por el nombre de cualquiera de sus documentos.
+        # Se escapan % y _ para que el texto del estudiante se busque literalmente.
+        from app.models.document import Document
+
+        escaped = query.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+        pattern = f"%{escaped}%"
+        by_document = (
+            select(AnalysisDocument.analysis_id)
+            .join(Document, Document.id == AnalysisDocument.document_id)
+            .where(Document.original_filename.ilike(pattern, escape="\\"))
+        )
         result = await self.db.execute(
             select(Analysis)
             .options(selectinload(Analysis.document_links))
-            .where(Analysis.user_id == user_id, Analysis.title.ilike(f"%{query}%"))
+            .where(
+                Analysis.user_id == user_id,
+                or_(Analysis.title.ilike(pattern, escape="\\"), Analysis.id.in_(by_document)),
+            )
             .order_by(Analysis.created_at.desc())
             .limit(50)
         )
