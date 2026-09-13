@@ -40,15 +40,15 @@ async def upload_document(
     current_user: User = Depends(get_current_user),
 ):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Solo se permiten archivos PDF")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Solo se permiten archivos PDF. Sube la sentencia en formato PDF.")
 
     content = await file.read()
     if not content[:4].startswith(PDF_MAGIC):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El archivo no es un PDF válido")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El archivo no es un PDF válido. Verifica que sea un PDF real y no otro archivo renombrado.")
 
     size_mb = len(content) / (1024 * 1024)
     if size_mb > settings.max_upload_size_mb:
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=f"El archivo excede {settings.max_upload_size_mb}MB")
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=f"El archivo supera los {settings.max_upload_size_mb} MB. Reduce su tamaño o divídelo en partes.")
 
     safe_filename = _sanitize_filename(file.filename)
 
@@ -104,7 +104,7 @@ async def delete_document(
     repo = DocumentRepository(db)
     doc = await repo.get_by_id(document_id)
     if not doc or doc.user_id != current_user.id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Documento no encontrado")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No se encontró el documento. Es posible que ya se haya eliminado.")
 
     storage = StorageRepository()
     await storage.delete(doc.storage_path)

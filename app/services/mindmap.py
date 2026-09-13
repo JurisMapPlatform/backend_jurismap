@@ -15,7 +15,7 @@ class MindMapService:
     async def _get_analysis(self, analysis_id: uuid.UUID, user_id: uuid.UUID):
         analysis = await self.repo.get_by_id(analysis_id)
         if not analysis or analysis.user_id != user_id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Análisis no encontrado")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No se encontró el análisis. Es posible que se haya eliminado; revisa tu historial.")
         return analysis
 
     async def generate_node(self, analysis_id: uuid.UUID, user_id: uuid.UUID, request: GenerateNodeRequest) -> dict:
@@ -23,7 +23,7 @@ class MindMapService:
 
         analysis = await self._get_analysis(analysis_id, user_id)
         if not analysis.mind_map_data:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El mapa mental aún no se ha generado")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El mapa mental aún no se ha generado. Espera a que termine el análisis.")
 
         mind_map = analysis.mind_map_data
         nodes = mind_map.get("nodes", [])
@@ -60,7 +60,7 @@ class MindMapService:
     async def rename_node(self, analysis_id: uuid.UUID, user_id: uuid.UUID, node_id: str, new_label: str) -> None:
         analysis = await self._get_analysis(analysis_id, user_id)
         if not analysis.mind_map_data:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El mapa mental aún no se ha generado")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El mapa mental aún no se ha generado. Espera a que termine el análisis.")
 
         mind_map = analysis.mind_map_data
         for node in mind_map.get("nodes", []):
@@ -68,12 +68,12 @@ class MindMapService:
                 node["label"] = new_label
                 await self.repo.update_mindmap(analysis_id, mind_map)
                 return
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Nodo no encontrado")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No se encontró el nodo. Actualiza la página para ver el mapa actual.")
 
     async def delete_node(self, analysis_id: uuid.UUID, user_id: uuid.UUID, node_id: str) -> None:
         analysis = await self._get_analysis(analysis_id, user_id)
         if not analysis.mind_map_data:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El mapa mental aún no se ha generado")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El mapa mental aún no se ha generado. Espera a que termine el análisis.")
 
         mind_map = analysis.mind_map_data
         nodes_to_remove = self._collect_subtree(mind_map, node_id)
@@ -130,7 +130,7 @@ class MindMapService:
             all_fundamentos.extend(fundamentos)
 
         if not all_fundamentos:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No se encontraron fundamentos")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No se encontraron fundamentos numerados en los documentos. Verifica que sean sentencias del Tribunal Constitucional con texto seleccionable.")
 
         def _classify():
             return get_classifier().classify_fundamentos(all_fundamentos)
@@ -185,5 +185,5 @@ class MindMapService:
     async def reorganize(self, analysis_id: uuid.UUID, user_id: uuid.UUID) -> dict:
         analysis = await self._get_analysis(analysis_id, user_id)
         if not analysis.mind_map_data:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El mapa mental aún no se ha generado")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El mapa mental aún no se ha generado. Espera a que termine el análisis.")
         return analysis.mind_map_data

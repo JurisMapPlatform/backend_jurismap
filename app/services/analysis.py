@@ -78,7 +78,7 @@ class AnalysisService:
     async def create(self, user_id: uuid.UUID, data: AnalysisCreate) -> Analysis:
         documents = await self.document_repo.get_by_ids(data.document_ids, user_id)
         if len(documents) != len(data.document_ids):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Uno o más documentos no encontrados")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Uno o más documentos ya no están disponibles. Vuelve a subirlos e inténtalo de nuevo.")
 
         analysis = Analysis(
             user_id=user_id,
@@ -281,13 +281,13 @@ class AnalysisService:
     async def get_detail(self, analysis_id: uuid.UUID, user_id: uuid.UUID) -> Analysis:
         analysis = await self.analysis_repo.get_detail(analysis_id)
         if not analysis or analysis.user_id != user_id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Análisis no encontrado")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No se encontró el análisis. Es posible que se haya eliminado; revisa tu historial.")
         return analysis
 
     async def rename(self, analysis_id: uuid.UUID, user_id: uuid.UUID, title: str) -> Analysis:
         analysis = await self.analysis_repo.get_by_id(analysis_id)
         if not analysis or analysis.user_id != user_id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Análisis no encontrado")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No se encontró el análisis. Es posible que se haya eliminado; revisa tu historial.")
         analysis.title = title
         await self.analysis_repo.update(analysis)
         return analysis
@@ -295,15 +295,15 @@ class AnalysisService:
     async def delete(self, analysis_id: uuid.UUID, user_id: uuid.UUID) -> None:
         analysis = await self.analysis_repo.get_by_id(analysis_id)
         if not analysis or analysis.user_id != user_id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Análisis no encontrado")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No se encontró el análisis. Es posible que se haya eliminado; revisa tu historial.")
         await self.analysis_repo.delete(analysis)
 
     async def cancel(self, analysis_id: uuid.UUID, user_id: uuid.UUID) -> None:
         analysis = await self.analysis_repo.get_by_id(analysis_id)
         if not analysis or analysis.user_id != user_id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Análisis no encontrado")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No se encontró el análisis. Es posible que se haya eliminado; revisa tu historial.")
         if analysis.status != "processing":
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Solo se puede cancelar un análisis en proceso")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Solo se puede cancelar un análisis en proceso. Es posible que ya haya terminado; revisa tu historial.")
         await self.analysis_repo.update_status(analysis_id, "cancelled")
 
     async def get_stats(self, user_id: uuid.UUID) -> dict:
