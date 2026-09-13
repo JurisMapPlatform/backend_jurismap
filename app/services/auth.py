@@ -74,6 +74,11 @@ class AuthService:
         except ValueError:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No se pudo validar tu cuenta de Google. Inténtalo de nuevo.")
 
+        # Solo se confía en correos que Google verificó: si no, alguien podría vincular una cuenta de
+        # Google con un correo ajeno sin verificar y entrar a la cuenta JurisMap de esa persona.
+        if not idinfo.get("email_verified"):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Tu cuenta de Google no tiene el correo verificado. Verifícalo en Google o regístrate con correo y contraseña.")
+
         google_id = idinfo["sub"]
         email = idinfo["email"]
         name = idinfo.get("name", email.split("@")[0])

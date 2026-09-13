@@ -40,5 +40,7 @@ class DeleteNodeRequest(BaseModel):
 
 
 class AutoSaveRequest(BaseModel):
-    nodes: list[dict] = []
-    edges: list[dict] = []
+    # Topes para que un cliente no pueda llenar la base de datos con un mapa desmesurado; un mapa
+    # real tiene decenas de nodos.
+    nodes: list[dict] = Field(default=[], max_length=2000)
+    edges: list[dict] = Field(default=[], max_length=4000)

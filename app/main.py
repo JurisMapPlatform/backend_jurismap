@@ -6,16 +6,16 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from app.config import settings
+from app.security import client_ip
 from app.routers import auth, analysis, mindmap, document, export
 from app.services.ws import ws_manager
 from app.services.analysis import recover_stale_analyses, fail_running_analyses
 
 logger = logging.getLogger(__name__)
-limiter = Limiter(key_func=get_remote_address)
+limiter = Limiter(key_func=client_ip)
 
 SWEEP_SECONDS = 120
 
@@ -86,7 +86,8 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://localhost:3000"],
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    # Solo el frontend de JurisMap (producción y sus vistas previas), no cualquier app de Vercel.
+    allow_origin_regex=r"https://frontend-jurismap(-[a-z0-9-]+)?\.vercel\.app",
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
