@@ -1,5 +1,6 @@
 import io
 import re
+from bisect import bisect_right
 
 from pypdf import PdfReader
 
@@ -121,14 +122,31 @@ class PDFExtractor:
         Se comparan los textos con los espacios normalizados: el fundamento une sus líneas con
         espacios y la página conserva los saltos de línea, así que una comparación literal casi
         nunca coincide. Se busca por fundamento y no por número, porque una misma sentencia puede
-        repetir numeraciones (antecedentes y fundamentos)."""
+        repetir numeraciones (antecedentes y fundamentos).
+
+        El inicio del fundamento se busca en el texto de todas las páginas unidas, así también se
+        encuentra cuando sus primeras palabras quedan partidas entre dos páginas; su página es
+        aquella en la que cae ese inicio. Además se avanza en orden (cada fundamento se busca
+        después del anterior), para que un texto repetido antes no le asigne otra página."""
         reader = self._reader(pdf_bytes)
         pages = [" ".join((page.extract_text() or "").split()) for page in reader.pages]
+        inicios, pos = [], 0
+        for text in pages:
+            inicios.append(pos)
+            pos += len(text) + 1  # +1 por el espacio que las une
+        completo = " ".join(pages)
+
+        cursor = 0
         for fund in fundamentos:
             preview = " ".join(fund.get("texto", "").split()[:8])
-            fund["page_number"] = next(
-                (num for num, text in enumerate(pages, 1) if preview and preview in text), None
-            )
+            idx = completo.find(preview, cursor) if preview else -1
+            if idx == -1 and preview:
+                idx = completo.find(preview)
+            if idx == -1:
+                fund["page_number"] = None
+                continue
+            fund["page_number"] = bisect_right(inicios, idx)
+            cursor = idx + 1
 
     def get_page_mapping(self, pdf_bytes: bytes, fundamentos: list[dict]) -> dict[int, int]:
         reader = self._reader(pdf_bytes)
