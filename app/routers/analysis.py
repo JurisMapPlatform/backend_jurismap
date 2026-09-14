@@ -54,6 +54,7 @@ async def list_analyses(
             id=a.id, title=a.title, status=a.status,
             processing_step=a.processing_step, created_at=a.created_at, updated_at=a.updated_at,
             document_count=len(a.document_links) if a.document_links is not None else 0,
+            node_count=len((a.mind_map_data or {}).get("nodes", [])),
         )
 
     if search:

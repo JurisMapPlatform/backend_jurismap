@@ -25,6 +25,8 @@ class AnalysisResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     document_count: int = 0
+    # HU-23: el historial muestra cuántos nodos tiene el mapa de cada análisis.
+    node_count: int = 0
 
     model_config = {"from_attributes": True}
 
