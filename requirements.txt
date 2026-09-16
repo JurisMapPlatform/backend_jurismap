@@ -16,5 +16,11 @@ google-cloud-storage==3.12.0
 google-auth==2.55.0
 httpx==0.28.1
 transformers==4.46.0
-torch==2.5.0
+# PyTorch: la rueda de PyPI para Linux trae dentro las librerias de CUDA (906 MB) aunque Cloud Run
+# no tiene tarjeta grafica y el clasificador siempre corre en CPU. Se usa la rueda oficial solo-CPU
+# de la misma version 2.5.0 (175 MB): el contenedor baja de 3,4 GB a ~1 GB y arranca mucho antes.
+# La rueda es para Python 3.13, que es el runtime fijado al desplegar (GOOGLE_RUNTIME_VERSION=3.13);
+# si se cambiara esa version, la instalacion fallaria con un aviso claro en el build.
+torch @ https://download.pytorch.org/whl/cpu/torch-2.5.0%2Bcpu-cp313-cp313-linux_x86_64.whl ; sys_platform == "linux"
+torch==2.5.0 ; sys_platform != "linux"
 pypdf==6.16.1
