@@ -34,7 +34,9 @@ class MindMapService:
             parent_id = root["id"] if root else (nodes[0]["id"] if nodes else "root")
 
         try:
-            gen = await asyncio.to_thread(GeminiClient().generate_node, {"nodes": nodes}, request.prompt)
+            # HU-17: se indica a Gemini bajo qué nodo irá el nuevo, para que lo genere relacionado con él.
+            padre = next((n for n in nodes if n["id"] == parent_id), None)
+            gen = await asyncio.to_thread(GeminiClient().generate_node, {"nodes": nodes}, request.prompt, padre)
             label = (gen.get("label") or request.prompt)[:60]
             metadata = gen.get("metadata") or {}
         except Exception:

@@ -254,13 +254,20 @@ Responde SOLO con JSON en formato React Flow (nodes + edges)."""
         text = self._generate(prompt)
         return self._parse_json(text)
 
-    def generate_node(self, context: dict, prompt: str) -> dict:
+    def generate_node(self, context: dict, prompt: str, parent: dict | None = None) -> dict:
         context_str = json.dumps(context, ensure_ascii=False)[:3000]
+        # El contexto se recorta a 3000 caracteres y podría no incluir el nodo padre: se envía aparte.
+        ubicacion = ""
+        if parent:
+            resumen = ((parent.get("metadata") or {}).get("summary") or "")[:500]
+            ubicacion = (f'El nuevo nodo se agregará como hijo del nodo "{parent.get("label", "")}"'
+                         + (f" ({resumen})" if resumen else "")
+                         + ". Debe estar relacionado con ese nodo.\n")
         gen_prompt = f"""Basándote en el siguiente contexto de un mapa mental jurídico,
 genera un nuevo nodo según la instrucción del usuario.
 
 Contexto del mapa: {context_str}
-Instrucción del usuario: {prompt}
+{ubicacion}Instrucción del usuario: {prompt}
 
 REGLAS:
 - "label": título de MÁXIMO 3 PALABRAS que resuma el nodo.
