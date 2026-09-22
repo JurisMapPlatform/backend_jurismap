@@ -366,6 +366,11 @@ class AnalysisService:
                     doc_index += 1
                     pdf_bytes = await storage.download(doc.storage_path)
                     text = await asyncio.to_thread(extractor.extract_text, pdf_bytes)
+                    # CP076: un PDF con texto pero que no es una sentencia del TC (un CV, un contrato)
+                    # no se analiza, aunque tenga párrafos numerados.
+                    if not extractor.is_tc_ruling(text):
+                        raise ValueError(f"No se encontraron fundamentos: '{doc.original_filename}' "
+                                         "no parece una sentencia del Tribunal Constitucional")
                     full_text += text + "\n"
                     fundamentos = await asyncio.to_thread(extractor.extract_fundamentos, pdf_bytes)
                     # HU-12: página de cada fundamento y documento del que proviene.

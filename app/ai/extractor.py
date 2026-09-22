@@ -1,5 +1,6 @@
 import io
 import re
+import unicodedata
 from bisect import bisect_right
 
 from pypdf import PdfReader
@@ -25,6 +26,26 @@ class PDFExtractor:
         ("fallo", re.compile(_PREFIX + r"(?:FALLO|FALLA|HA\s+RESUELTO|SE\s+RESUELVE|RESUELVE)(?:\s+\d+)?\s*:?$")),
         ("voto", re.compile(r"^(?:FUNDAMENTOS?\s+(?:DE\s+)?)?VOTO\s+(?:SINGULAR|DIRIMENTE|DEL?|DE\s+LOS?|DE\s+LA)\b")),
     )
+
+    # Filtro de tipo de documento: una sentencia del TC nombra varias veces al "Tribunal
+    # Constitucional" (en todas las sentencias con texto del corpus aparece al menos 3 veces) y tiene
+    # alguna referencia jurisprudencial. Un CV o un contrato también tienen párrafos numerados, por
+    # lo que sin este filtro se analizarían como si fueran una sentencia.
+    TC_MENTION = re.compile(r"tribunal\s+constitucional")
+    JURIS_REFERENCE = re.compile(
+        r"\bexp(?:ediente)?\s*\.?\s*n\s*[.°ºo]*\s*\d"   # EXP. N.° 01275-2022-PHC/TC
+        r"|\d-[a-z]{1,4}/tc\b"                            # código del expediente: 01275-2022-PHC/TC
+        r"|\bsentencias?\b|\bjurisprudencia|\bfundamentos?\b|\bha\s+resuelto\b"
+    )
+    MIN_TC_MENTIONS = 2
+
+    @classmethod
+    def is_tc_ruling(cls, text: str) -> bool:
+        """Indica si el texto parece una sentencia (jurisprudencia) del Tribunal Constitucional."""
+        plain = unicodedata.normalize("NFKD", text or "")
+        plain = "".join(c for c in plain if not unicodedata.combining(c)).lower()
+        return (len(cls.TC_MENTION.findall(plain)) >= cls.MIN_TC_MENTIONS
+                and cls.JURIS_REFERENCE.search(plain) is not None)
 
     @classmethod
     def _section_of(cls, line: str) -> str | None:
