@@ -98,29 +98,12 @@ class BETOClassifier:
         return results
 
     def classify_fundamentos(self, fundamentos: list[dict]) -> list[dict]:
-        # Posición relativa DENTRO DE CADA SENTENCIA, como en el paper (ec. 1) y en el entrenamiento
-        # (04_prepare_dataset.py): total = número de fundamento más alto de esa sentencia. Con varios
-        # PDF, cada documento se mide por separado; antes se usaba la cantidad de bloques de todos
-        # los documentos juntos, una entrada distinta a la que el modelo vio al entrenar.
-        totales: dict = {}
-        for f in fundamentos:
-            doc = f.get("document_id")
-            totales[doc] = max(totales.get(doc, 0), f["fundamento_num"])
-        texts = []
-        for f in fundamentos:
-            total = totales[f.get("document_id")]
-            pos_ratio = f["fundamento_num"] / total if total > 0 else 0
-            if pos_ratio <= 0.15:
-                tag = "INICIO"
-            elif pos_ratio <= 0.40:
-                tag = "DESARROLLO_TEMPRANO"
-            elif pos_ratio <= 0.70:
-                tag = "DESARROLLO"
-            elif pos_ratio <= 0.90:
-                tag = "DESARROLLO_TARDIO"
-            else:
-                tag = "CIERRE"
-            texts.append(f"[POSICION: {f['fundamento_num']}/{total}] [{tag}] {f['texto']}")
+        # El modelo recibe el texto del fundamento tal cual, sin prefijo de posición. La validación
+        # cruzada mostró que ese prefijo era redundante: la posición del fundamento se deduce del
+        # propio texto (un petitorio se reconoce por cómo está redactado), de modo que la etiqueta
+        # no añadía información y sí ocupaba parte de los 256 tokens de la ventana. El modelo
+        # desplegado está entrenado sin ella, así que este texto es el mismo que vio al entrenar.
+        texts = [f["texto"] for f in fundamentos]
 
         predictions = self.predict(texts)
 
