@@ -1,7 +1,7 @@
 import asyncio
 
 from fastapi import WebSocket, status
-from jose import jwt, JWTError
+import jwt
 
 from app.config import settings
 
@@ -32,7 +32,7 @@ class WSManager:
         if token:
             try:
                 user_id = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm]).get("sub")
-            except JWTError:
+            except jwt.PyJWTError:
                 user_id = None
         if not user_id:
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
